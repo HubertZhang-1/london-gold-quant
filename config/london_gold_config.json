@@ -1,0 +1,62 @@
+{
+  "symbol": "XAU",
+  "currency": "USD",
+  "data": {
+    "cache": "data/london_gold_daily.csv",
+    "scan": "data/london_gold_scan.json",
+    "start": "2010-01-01"
+  },
+  "costs": {
+    "capital": 100000.0,
+    "position_oz": 10.0,
+    "spread": 0.35,
+    "slippage": 0.10,
+    "commission_per_oz": 0.10
+  },
+  "strategies": {
+    "donchian_breakout": {
+      "default": {
+        "entry_n": 40,
+        "exit_n": 20,
+        "ma_filter": 100,
+        "stop_mult": 3.0
+      },
+      "grid": {
+        "entry_n": [20, 40, 55],
+        "exit_n": [10, 20],
+        "ma_filter": [0, 100],
+        "stop_mult": [3.0]
+      }
+    },
+    "ema_cross": {
+      "default": {
+        "fast_n": 10,
+        "slow_n": 40,
+        "stop_mult": 3.0
+      },
+      "grid": {
+        "fast_n": [5, 10, 20],
+        "slow_n": [20, 40, 60],
+        "stop_mult": [2.5, 3.0]
+      }
+    },
+    "rsi_reversal": {
+      "default": {
+        "rsi_n": 14,
+        "oversold": 30,
+        "overbought": 70,
+        "ma_filter": 50,
+        "rsi_exit_long": 55,
+        "rsi_exit_short": 45,
+        "stop_mult": 2.5
+      },
+      "grid": {
+        "rsi_n": [10, 14],
+        "oversold": [25, 30],
+        "overbought": [70, 75],
+        "ma_filter": [50, 100],
+        "stop_mult": [2.0, 2.5]
+      }
+    }
+  }
+}

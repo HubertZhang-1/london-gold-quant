@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+data/london_gold_daily.csv
+data/london_gold_scan.json
+reports/london_gold_*
