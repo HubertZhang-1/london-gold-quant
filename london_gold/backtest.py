@@ -22,6 +22,10 @@ class CostConfig:
     spread: float = 0.35
     slippage: float = 0.10
     commission_per_oz: float = 0.10
+    leverage: float = 0.0
+    max_oz: float = 0.0
+    risk_per_trade_pct: float = 0.0
+    margin_call_pct: float = 0.0
 
 
 def _fill_price(price: float, direction: int, cost: CostConfig) -> float:
@@ -37,6 +41,7 @@ def run_backtest(
     cost: CostConfig | None = None,
     name: str = "",
     params: dict | None = None,
+    reentry_after_stop: bool = True,
 ) -> dict:
     """Run one backtest over a frame containing ``signal`` and ``stop_dist``."""
     cost = cost or CostConfig()
@@ -64,6 +69,8 @@ def run_backtest(
     cash_at_entry = 0.0
     equity = np.full(n, np.nan)
     trade_records = []
+    stopped = False
+    blocked_signal = 0
 
     def close_position(i, exit_mid, reason):
         nonlocal cash, pos_oz
@@ -96,19 +103,37 @@ def run_backtest(
             stop_price = entry_mid - stop_dist if pos_oz > 0 else entry_mid + stop_dist
             if pos_oz > 0 and lows[i] <= stop_price:
                 close_position(i, stop_price, "stop")
+                blocked_signal = signals[i - 1] if i > 0 else 0
             elif pos_oz < 0 and highs[i] >= stop_price:
                 close_position(i, stop_price, "stop")
+                blocked_signal = signals[i - 1] if i > 0 else 0
 
         # Signal exits and entries fill on the next bar open.
         if i > 0:
             prev_signal = signals[i - 1]
+            if prev_signal == 0:
+                blocked_signal = 0
             if pos_oz != 0 and (prev_signal == 0 or (pos_oz > 0) != (prev_signal > 0)):
                 close_position(i, float(opens[i]), "signal")
-            if pos_oz == 0 and prev_signal != 0:
+            if (
+                pos_oz == 0
+                and prev_signal != 0
+                and not stopped
+                and (reentry_after_stop or prev_signal != blocked_signal)
+            ):
                 entry_mid = float(opens[i])
                 entry_fill = _fill_price(entry_mid, prev_signal, cost)
-                pos_oz = float(prev_signal) * cost.position_oz
                 stop_dist = float(stop_dists[i - 1]) if not np.isnan(stop_dists[i - 1]) else 0.0
+                oz = cost.position_oz
+                if cost.leverage > 0:
+                    oz = cost.capital * cost.leverage / entry_mid
+                if cost.risk_per_trade_pct > 0 and stop_dist > 0:
+                    risk_oz = cost.capital * cost.risk_per_trade_pct / stop_dist
+                    oz = min(oz, risk_oz)
+                if cost.max_oz > 0:
+                    oz = min(oz, cost.max_oz)
+                oz = max(0.01, round(oz, 2))
+                pos_oz = float(prev_signal) * oz
                 entry_idx = i
                 cash_at_entry = cash
                 commission = cost.commission_per_oz * abs(pos_oz)
@@ -117,12 +142,19 @@ def run_backtest(
                 else:
                     cash += entry_fill * abs(pos_oz) - commission
 
-        if pos_oz > 0:
-            equity[i] = cash + (closes[i] - entry_mid) * pos_oz
-        elif pos_oz < 0:
-            equity[i] = cash + (entry_mid - closes[i]) * abs(pos_oz)
+        if pos_oz != 0:
+            equity[i] = cash + pos_oz * closes[i]
         else:
             equity[i] = cash
+
+        if (
+            cost.margin_call_pct > 0
+            and pos_oz != 0
+            and equity[i] <= cost.capital * (1.0 - cost.margin_call_pct)
+        ):
+            close_position(i, float(closes[i]), "margin_call")
+            equity[i] = cash
+            stopped = True
 
     if pos_oz != 0:
         close_position(n - 1, float(closes[-1]), "eod")

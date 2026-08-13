@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from london_gold.backtest import CostConfig, run_backtest
 from london_gold.indicators import atr, donchian, rsi
+from london_gold.intraday_strategy import open_range_breakout_signals
 from london_gold.report import write_equity_svg
 from london_gold.strategies import (
     donchian_breakout_signals,
@@ -88,6 +89,7 @@ def main():
     rising["stop_dist"] = 0.0
     rising_result = run_backtest(rising, cost=no_cost_cfg)
     check(rising_result["stats"]["total_return"] > 0, "long position profits when price rises")
+    check(rising_result["equity"][len(rising) // 2] > 100000, "long position marks equity above capital in a rally")
 
     falling = df.iloc[-20:].copy()
     falling["signal"] = 1
@@ -100,6 +102,27 @@ def main():
     short_rising["stop_dist"] = 0.0
     short_rising_result = run_backtest(short_rising, cost=no_cost_cfg)
     check(short_rising_result["stats"]["total_return"] < 0, "short position loses when price rises")
+    check(short_rising_result["equity"][len(short_rising) // 2] < 100000, "short position marks equity below capital in a rally")
+
+    lev_cfg = CostConfig(capital=100000, position_oz=10, spread=0, slippage=0, commission_per_oz=0, leverage=50, margin_call_pct=0.5)
+    leverage_test = df.iloc[-40:].copy()
+    leverage_test["signal"] = 1
+    leverage_test["stop_dist"] = 0.0
+    leveraged = run_backtest(leverage_test, cost=lev_cfg)
+    check(leveraged["trades"]["exit_reason"].eq("margin_call").any(), "50x long is margin-called on a fall")
+    check(leveraged["stats"]["final_equity"] <= 50001, "margin call caps the loss near the configured threshold")
+
+    hourly = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=720, freq="h"),
+            "open": 4000 + 30 * np.sin(np.arange(720) / 24.0),
+            "high": 4000 + 30 * np.sin(np.arange(720) / 24.0) + 5,
+            "low": 4000 + 30 * np.sin(np.arange(720) / 24.0) - 5,
+            "close": 4000 + 30 * np.sin(np.arange(720) / 24.0),
+        }
+    )
+    orb = open_range_breakout_signals(hourly, range_hours=3, ma_filter=24, stop_mult=1.5)
+    check(orb["signal"].abs().sum() > 0, "open-range breakout generates hourly signals")
 
     svg_path = Path("data") / "test_london_gold_equity.svg"
     svg_path.parent.mkdir(exist_ok=True)
