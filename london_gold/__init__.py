@@ -15,6 +15,10 @@ from .strategies import (
     ema_cross_signals,
     rsi_reversal_signals,
 )
+from .intraday_strategies_v3 import (
+    mean_reversion_signals,
+    momentum_scalp_signals,
+)
 
 __all__ = [
     "fetch_daily",
@@ -27,6 +31,8 @@ __all__ = [
     "momentum_trend_signals",
     "zscore_reversion_signals",
     "combine_ensemble",
+    "momentum_scalp_signals",
+    "mean_reversion_signals",
     "CostConfig",
     "run_backtest",
     "donchian_breakout_signals",
