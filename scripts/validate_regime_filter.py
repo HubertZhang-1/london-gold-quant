@@ -22,8 +22,9 @@ DF = DF.sort_values("date").reset_index(drop=True)
 COST = CostConfig(capital=100_000, position_oz=10, spread=0.35, slippage=0.10,
                   commission_per_oz=0.10, risk_per_trade_pct=0.01)
 
-BASE = dict(min_confidence=0.55, rr_target=1.8, min_adx=18, use_session_filter=False)
-best = dict(**BASE, regime_filter=True, er_threshold=0.12, adx_regime_threshold=20.0)
+BASE = dict(min_confidence=0.55, rr_target=1.8, min_adx=18, use_session_filter=False,
+            regime_filter=False)  # explicit baseline without regime gate
+best = {**BASE, "regime_filter": True, "er_threshold": 0.12, "adx_regime_threshold": 20.0}
 
 # Full 2024-2026 continuous run
 seg = DF[DF["date"] >= "2024-01-01"].reset_index(drop=True)

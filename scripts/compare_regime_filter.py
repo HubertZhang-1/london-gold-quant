@@ -23,14 +23,15 @@ DF = DF[DF["date"] >= "2024-01-01"].reset_index(drop=True)
 COST = CostConfig(capital=100_000, position_oz=10, spread=0.35, slippage=0.10,
                   commission_per_oz=0.10, risk_per_trade_pct=0.01)
 
-BASE = dict(min_confidence=0.55, rr_target=1.8, min_adx=18, use_session_filter=False)
+BASE = dict(min_confidence=0.55, rr_target=1.8, min_adx=18, use_session_filter=False,
+            regime_filter=False)
 
 # vary regime filter on/off, and ER/ADX thresholds
 variants = {
-    "no_filter": dict(**BASE),
-    "ER.18_ADX20": dict(**BASE, regime_filter=True, er_threshold=0.18, adx_regime_threshold=20.0),
-    "ER.22_ADX22": dict(**BASE, regime_filter=True, er_threshold=0.22, adx_regime_threshold=22.0),
-    "ER.15_ADX18": dict(**BASE, regime_filter=True, er_threshold=0.15, adx_regime_threshold=18.0),
+    "no_filter": dict(BASE),
+    "ER.18_ADX20": {**BASE, "regime_filter": True, "er_threshold": 0.18, "adx_regime_threshold": 20.0},
+    "ER.22_ADX22": {**BASE, "regime_filter": True, "er_threshold": 0.22, "adx_regime_threshold": 22.0},
+    "ER.15_ADX18": {**BASE, "regime_filter": True, "er_threshold": 0.15, "adx_regime_threshold": 18.0},
 }
 
 windows = [
