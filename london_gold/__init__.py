@@ -24,6 +24,19 @@ from .factor_library import (
     aggregate_score,
     build_factors,
 )
+from .macro_factors import (
+    forward_fill_macro,
+    macro_direction_score,
+)
+from .cot_factors import (
+    compute_cot_factors,
+    cot_timing_score,
+)
+from .gold_system import (
+    MICRO_WEIGHTS,
+    SystemConfig,
+    build_three_line_frame,
+)
 
 __all__ = [
     "fetch_daily",
@@ -41,6 +54,13 @@ __all__ = [
     "build_factors",
     "aggregate_score",
     "FACTOR_BUILDERS",
+    "macro_direction_score",
+    "forward_fill_macro",
+    "compute_cot_factors",
+    "cot_timing_score",
+    "SystemConfig",
+    "build_three_line_frame",
+    "MICRO_WEIGHTS",
     "CostConfig",
     "run_backtest",
     "donchian_breakout_signals",
