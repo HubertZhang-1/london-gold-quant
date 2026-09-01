@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .indicators import adx, atr, bollinger, ema, rsi, sma, stochastic
+from .indicators import adx, atr, bollinger, ema, rsi, sma, stochastic, trend_regime
 
 # (start_hour, end_hour, weight) in UTC. Overlap weighted highest.
 SESSIONS_UTC = {
@@ -47,12 +47,21 @@ def momentum_scalp_signals(
     stop_mult: float = 1.0,          # SL = stop_mult * ATR (tight stop wins on 1h)
     use_session_filter: bool = False,
     min_session_weight: float = 0.5,
+    regime_filter: bool = True,      # gate entries to trend regimes (default ON)
+    er_window: int = 48,
+    er_threshold: float = 0.12,
+    adx_regime_threshold: float = 20.0,
 ) -> pd.DataFrame:
     """Dual-momentum entry with confidence score + ADX gate + session filter.
 
     Long conditions (weighted): fast ROC>0, slow ROC>0, price>EMA(21),
       RSI in (oversold, 70), Stoch%K>%D, ADX>min_adx.
     Confidence = weighted agreement; entries only above threshold.
+
+    When ``regime_filter`` is True, entries are suppressed unless the market is
+    in a trend regime (efficiency-ratio AND longer-context ADX both above their
+    thresholds). This is meant to avoid the choppy/mean-reverting stretches
+    (e.g. 2024H2) where the momentum edge disappears.
     """
     out = df.copy().reset_index(drop=True)
     close = out["close"]
@@ -66,6 +75,8 @@ def momentum_scalp_signals(
     adx14 = adx(high, low, close, adx_bars)
     atr14 = atr(high, low, close, 14)
     hours = out["date"].dt.hour.to_numpy()
+    regime = trend_regime(close, high, low, er_window, er_threshold,
+                          adx_window=adx_bars, adx_threshold=adx_regime_threshold).to_numpy() if regime_filter else None
 
     n = len(out)
     signals = np.zeros(n, dtype=int)
@@ -80,6 +91,14 @@ def momentum_scalp_signals(
         c = close.iloc[i]
         a = adx14.iloc[i]
         if np.isnan(a) or np.isnan(ema21.iloc[i]):
+            continue
+
+        # regime gate: suppress entries outside a clean trend regime
+        if regime is not None and (np.isnan(regime[i]) or regime[i] < 0.5):
+            signals[i] = 0
+            stops[i] = 0.0
+            takes[i] = 0.0
+            conf[i] = 0.0
             continue
 
         h = hours[i]
@@ -136,6 +155,7 @@ def momentum_scalp_signals(
     out["stop_dist"] = stops
     out["tp_dist"] = takes
     out["confidence"] = conf
+    out["regime"] = np.nan if regime is None else regime
     out["fast_roc"] = fast_roc
     out["slow_roc"] = slow_roc
     out["ema21"] = ema21

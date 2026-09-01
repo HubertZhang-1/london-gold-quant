@@ -77,3 +77,30 @@ def bollinger(close: pd.Series, window: int = 20, num_std: float = 2.0) -> tuple
     upper = mid + num_std * std
     lower = mid - num_std * std
     return mid, upper, lower
+
+
+def efficiency_ratio(close: pd.Series, window: int = 48) -> pd.Series:
+    """Kaufman efficiency ratio: |net move| / sum(|1-bar moves|), 0..1.
+
+    High = clean directional trend (small noise), low = choppy. Useful as a
+    trend-vs-noise regime filter for momentum strategies.
+    """
+    c = close.to_numpy(float)
+    n = len(c)
+    out = np.full(n, np.nan)
+    for i in range(window, n):
+        net = abs(c[i] - c[i - window])
+        gross = np.abs(np.diff(c[i - window:i + 1])).sum()
+        out[i] = net / gross if gross > 0 else 0.0
+    return pd.Series(out, index=close.index)
+
+
+def trend_regime(close: pd.Series, high: pd.Series, low: pd.Series,
+                 er_window: int = 48, er_threshold: float = 0.18,
+                 adx_window: int = 14, adx_threshold: float = 20.0) -> pd.Series:
+    """Return 1 when the market is in a tradeable 'trend' regime (both the
+    efficiency ratio and ADX agree), 0 otherwise. Used to gate momentum entries."""
+    er = efficiency_ratio(close, er_window)
+    adx_ = adx(high, low, close, adx_window)
+    mask = (er >= er_threshold) & (adx_ >= adx_threshold)
+    return mask.astype(float)
