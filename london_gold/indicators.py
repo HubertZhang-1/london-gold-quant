@@ -104,3 +104,76 @@ def trend_regime(close: pd.Series, high: pd.Series, low: pd.Series,
     adx_ = adx(high, low, close, adx_window)
     mask = (er >= er_threshold) & (adx_ >= adx_threshold)
     return mask.astype(float)
+
+
+def momentum(close: pd.Series, window: int = 10) -> pd.Series:
+    """Momentum (rate-of-change) in points: close - close[window]."""
+    return close - close.shift(window)
+
+
+def roc(close: pd.Series, window: int = 10) -> pd.Series:
+    """Rate of change in percent."""
+    return close.pct_change(window) * 100.0
+
+
+def williams_r(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    """Williams %R (-100..0). Close to 0 = overbought, near -100 = oversold."""
+    highest = high.rolling(window).max()
+    lowest = low.rolling(window).min()
+    return -100.0 * (highest - close) / (highest - lowest).replace(0, np.nan)
+
+
+def cci(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 20) -> pd.Series:
+    """Commodity Channel Index."""
+    tp = (high + low + close) / 3.0
+    sma_tp = tp.rolling(window).mean()
+    mad = (tp - sma_tp).abs().rolling(window).mean()
+    return (tp - sma_tp) / (0.015 * mad.replace(0, np.nan))
+
+
+def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD line, signal line, histogram."""
+    line = ema(close, fast) - ema(close, slow)
+    signal_line = line.ewm(span=signal, adjust=False).mean()
+    hist = line - signal_line
+    return line, signal_line, hist
+
+
+def osc_ma(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+    """OsMA histogram (MACD line - signal line)."""
+    line, signal_line, hist = macd(close, fast, slow, signal)
+    return hist
+
+
+def bulls_power(close: pd.Series, ema_window: int = 13) -> pd.Series:
+    """Bulls Power: close - EMA(close). Positive = buyers in control."""
+    return close - ema(close, ema_window)
+
+
+def bears_power(close: pd.Series, low: pd.Series, ema_window: int = 13) -> pd.Series:
+    """Bears Power: low - EMA(close). Negative = sellers in control."""
+    return low - ema(close, ema_window)
+
+
+def force_index(close: pd.Series, volume: pd.Series, ema_window: int = 13) -> pd.Series:
+    """Force Index (Elder): (close - close[1]) * volume, smoothed."""
+    fo = (close.diff() * volume).fillna(0.0)
+    return ema(fo, ema_window)
+
+
+def aroon(high: pd.Series, low: pd.Series, window: int = 25) -> tuple[pd.Series, pd.Series]:
+    """Aroon up/down (0..100)."""
+    up = high.rolling(window + 1).apply(lambda x: float(np.argmax(x)) / window * 100.0, raw=True)
+    down = low.rolling(window + 1).apply(lambda x: float(np.argmin(x)) / window * 100.0, raw=True)
+    return up, down
+
+
+def chaikin_osc(high: pd.Series, low: pd.Series, close: pd.Series,
+                volume: pd.Series, fast: int = 3, slow: int = 10) -> pd.Series:
+    """Chaikin Oscillator (of accumulation/distribution line)."""
+    # Money flow multiplier
+    hl = (high - low).replace(0, np.nan)
+    mfm = ((close - low) - (high - close)) / hl
+    mfv = mfm.fillna(0.0) * volume.fillna(0.0)
+    adl = mfv.cumsum()
+    return ema(adl, fast) - ema(adl, slow)

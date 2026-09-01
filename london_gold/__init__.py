@@ -19,6 +19,11 @@ from .intraday_strategies_v3 import (
     mean_reversion_signals,
     momentum_scalp_signals,
 )
+from .factor_library import (
+    FACTOR_BUILDERS,
+    aggregate_score,
+    build_factors,
+)
 
 __all__ = [
     "fetch_daily",
@@ -33,6 +38,9 @@ __all__ = [
     "combine_ensemble",
     "momentum_scalp_signals",
     "mean_reversion_signals",
+    "build_factors",
+    "aggregate_score",
+    "FACTOR_BUILDERS",
     "CostConfig",
     "run_backtest",
     "donchian_breakout_signals",
