@@ -212,13 +212,10 @@ def main() -> None:
     }
 
     results = []
-    # V3 strategies (with ATR SL/TP) use the v3 engine
-    for label, fn in [("V3_MOM_SCALP", lambda: momentum_scalp_signals(
-            df, min_confidence=0.65, rr_target=2.0, stop_mult=1.0)),
-        ("V3_MOM_SCALP_STRONG", lambda: momentum_scalp_signals(
-            df, min_confidence=0.75, rr_target=2.0, stop_mult=1.0)),
-        ("V3_MEANREV", lambda: mean_reversion_signals(
-            df, entry_z=2.0, rr_target=2.0, stop_mult=1.5, max_adx_meanrev=32.0))]:
+    # V3 strategies (with ATR SL/TP) use the v3 engine; use module defaults (optimized)
+    for label, fn in [("V3_MOM_SCALP", lambda: momentum_scalp_signals(df)),
+        ("V3_MOM_SCALP_STRONG", lambda: momentum_scalp_signals(df, min_confidence=0.65, rr_target=2.0)),
+        ("V3_MEANREV", lambda: mean_reversion_signals(df))]:
         frame = fn()
         res = backtest_v3(frame, cost, label, {})
         results.append(res)

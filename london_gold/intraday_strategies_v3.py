@@ -39,13 +39,13 @@ def momentum_scalp_signals(
     slow_bars: int = 24,
     ema_bars: int = 21,
     adx_bars: int = 14,
-    min_adx: float = 22.0,
+    min_adx: float = 18.0,
     rsi_oversold: float = 30.0,
     rsi_overbought: float = 70.0,
-    min_confidence: float = 0.65,
-    rr_target: float = 2.0,          # TP = rr_target * SL
-    stop_mult: float = 1.0,          # SL = stop_mult * ATR
-    use_session_filter: bool = True,
+    min_confidence: float = 0.55,
+    rr_target: float = 1.8,          # TP = rr_target * SL (optimized on 1h: 1.8-2.0)
+    stop_mult: float = 1.0,          # SL = stop_mult * ATR (tight stop wins on 1h)
+    use_session_filter: bool = False,
     min_session_weight: float = 0.5,
 ) -> pd.DataFrame:
     """Dual-momentum entry with confidence score + ADX gate + session filter.
