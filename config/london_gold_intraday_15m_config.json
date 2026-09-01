@@ -1,0 +1,37 @@
+{
+  "symbol": "GC=F",
+  "proxy": "COMEX gold futures used as a free London gold proxy",
+  "currency": "USD",
+  "data": {
+    "cache": "data/gc_m15.csv",
+    "interval": "15m",
+    "period": "60d",
+    "start": "2026-06-14",
+    "bars_per_hour": 4.0
+  },
+  "costs": {
+    "capital": 100000.0,
+    "position_oz": 10.0,
+    "spread": 0.35,
+    "slippage": 0.10,
+    "commission_per_oz": 0.10,
+    "leverage": 50.0,
+    "max_oz": 0.0,
+    "risk_per_trade_pct": 0.02,
+    "margin_call_pct": 0.5
+  },
+  "strategies": {
+    "open_range_breakout": {
+      "default": {
+        "range_hours": 3,
+        "ma_filter": 24,
+        "stop_mult": 1.5
+      },
+      "grid": {
+        "range_hours": [1, 2, 3, 4],
+        "ma_filter": [0, 12, 24],
+        "stop_mult": [1.0, 1.5]
+      }
+    }
+  }
+}

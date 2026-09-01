@@ -1,0 +1,76 @@
+{
+  "symbol": "GC=F",
+  "proxy": "COMEX gold futures used as a free London gold proxy",
+  "currency": "USD",
+  "data": {
+    "cache": "data/gc_h1.csv",
+    "interval": "1h",
+    "period": "2y",
+    "start": "2024-08-01",
+    "bars_per_hour": 1.0
+  },
+  "costs": {
+    "capital": 100000.0,
+    "position_oz": 10.0,
+    "spread": 0.35,
+    "slippage": 0.10,
+    "commission_per_oz": 0.10,
+    "leverage": 20.0,
+    "max_oz": 0.0,
+    "risk_per_trade_pct": 0.02,
+    "margin_call_pct": 0.5
+  },
+  "strategies": {
+    "session_breakout": {
+      "default": {
+        "session": "london",
+        "range_bars": 2,
+        "stop_mult": 1.5,
+        "ma_filter": 24,
+        "atr_filter": true
+      },
+      "grid": {
+        "session": ["london", "ny"],
+        "range_bars": [2, 3],
+        "stop_mult": [1.5, 2.0],
+        "ma_filter": [0, 24],
+        "atr_filter": [true, false]
+      }
+    },
+    "momentum_trend": {
+      "default": {
+        "fast_bars": 6,
+        "slow_bars": 24,
+        "ma_filter": 48,
+        "stop_mult": 2.0
+      },
+      "grid": {
+        "fast_bars": [4, 6, 12],
+        "slow_bars": [24, 48],
+        "ma_filter": [0, 48],
+        "stop_mult": [2.0, 3.0]
+      }
+    },
+    "zscore_reversion": {
+      "default": {
+        "window": 24,
+        "entry_z": 2.0,
+        "exit_z": 0.5,
+        "ma_filter": 24,
+        "stop_mult": 1.5
+      },
+      "grid": {
+        "window": [12, 24, 48],
+        "entry_z": [1.5, 2.0, 2.5],
+        "exit_z": [0.5],
+        "ma_filter": [0, 24],
+        "stop_mult": [1.5, 2.0]
+      }
+    }
+  },
+  "ensemble": {
+    "members": ["session_breakout", "momentum_trend", "zscore_reversion"],
+    "min_votes": 2,
+    "use_defaults": true
+  }
+}

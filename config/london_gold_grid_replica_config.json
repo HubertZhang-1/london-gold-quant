@@ -1,0 +1,21 @@
+{
+  "symbol": "GC=F",
+  "proxy_for": "XAUUSD.c",
+  "currency": "USD",
+  "data": {
+    "cache": "data/gc_h1.csv",
+    "interval": "1h",
+    "period": "60d",
+    "warmup_bars": 288
+  },
+  "grid": {
+    "atr_bars": 14,
+    "atr_multiplier": 0.35,
+    "min_step": 0.6,
+    "max_step": 2.5
+  },
+  "scenarios": {
+    "paths": ["OHLC", "OLHC"],
+    "spreads": [0.35, 0.525, 0.7]
+  }
+}

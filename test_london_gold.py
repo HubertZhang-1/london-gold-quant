@@ -13,6 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from london_gold.backtest import CostConfig, run_backtest
 from london_gold.indicators import atr, donchian, rsi
 from london_gold.intraday_strategy import open_range_breakout_signals
+from london_gold.intraday_strategies_v2 import (
+    combine_ensemble,
+    momentum_trend_signals,
+    session_breakout_signals,
+    zscore_reversion_signals,
+)
 from london_gold.report import write_equity_svg
 from london_gold.strategies import (
     donchian_breakout_signals,
@@ -123,6 +129,15 @@ def main():
     )
     orb = open_range_breakout_signals(hourly, range_hours=3, ma_filter=24, stop_mult=1.5)
     check(orb["signal"].abs().sum() > 0, "open-range breakout generates hourly signals")
+
+    ses = session_breakout_signals(hourly, session="london", range_bars=2, stop_mult=1.5, ma_filter=0, atr_filter=False)
+    check(ses["signal"].abs().sum() > 0, "session breakout generates hourly signals")
+    mom = momentum_trend_signals(hourly, fast_bars=6, slow_bars=24, ma_filter=48, stop_mult=2.0)
+    check(mom["signal"].abs().sum() > 0, "dual momentum generates signals")
+    zrev = zscore_reversion_signals(hourly, window=24, entry_z=2.0, exit_z=0.5, ma_filter=0, stop_mult=1.5)
+    check(zrev["signal"].abs().sum() > 0, "z-score reversion generates signals")
+    ens = combine_ensemble([ses, mom, zrev], min_votes=2)
+    check(len(ens) == len(hourly) and "signal" in ens.columns, "ensemble frame has the expected shape")
 
     svg_path = Path("data") / "test_london_gold_equity.svg"
     svg_path.parent.mkdir(exist_ok=True)

@@ -13,6 +13,7 @@ def open_range_breakout_signals(
     range_hours: int = 3,
     ma_filter: int = 0,
     stop_mult: float = 1.0,
+    bars_per_hour: float = 1.0,
 ) -> pd.DataFrame:
     """Daily open-range breakout: trade breaks of the first N hourly bars.
 
@@ -31,6 +32,7 @@ def open_range_breakout_signals(
     stops = np.zeros(n)
     range_highs = np.full(n, np.nan)
     range_lows = np.full(n, np.nan)
+    range_bars = max(1, int(round(range_hours * bars_per_hour)))
 
     i = 0
     while i < n:
@@ -39,12 +41,12 @@ def open_range_breakout_signals(
         while j < n and days[j] == day:
             j += 1
 
-        if j - i >= range_hours + 1:
-            rh = float(np.max(highs[i : i + range_hours]))
-            rl = float(np.min(lows[i : i + range_hours]))
+        if j - i >= range_bars + 1:
+            rh = float(np.max(highs[i : i + range_bars]))
+            rl = float(np.min(lows[i : i + range_bars]))
             width = rh - rl
             pos = 0
-            for k in range(i + range_hours, j):
+            for k in range(i + range_bars, j):
                 c = closes[k]
                 if pos == 0:
                     trend_ok = ma_filter <= 0 or not np.isnan(ma.iloc[k])
@@ -69,8 +71,8 @@ def open_range_breakout_signals(
                     else:
                         signals[k] = -1
 
-            range_highs[i : min(i + range_hours, j)] = rh
-            range_lows[i : min(i + range_hours, j)] = rl
+            range_highs[i : min(i + range_bars, j)] = rh
+            range_lows[i : min(i + range_bars, j)] = rl
         i = j
 
     out["signal"] = signals

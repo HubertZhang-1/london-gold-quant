@@ -1,0 +1,35 @@
+{
+  "symbol": "GC=F",
+  "proxy_for": "XAUUSD",
+  "currency": "USD",
+  "data": {
+    "cache": "data/gc_m15.csv",
+    "interval": "15m",
+    "period": "60d"
+  },
+  "strategy": {
+    "ema_bars": 48,
+    "fast_bars": 4,
+    "slow_bars": 16,
+    "breakout_bars": 8,
+    "pullback_bars": 3,
+    "atr_bars": 14,
+    "min_body_ratio": 0.4,
+    "max_breakout_atr": 2.5,
+    "pullback_tolerance_atr": 0.35,
+    "min_stop_atr": 0.8,
+    "max_stop_atr": 2.0
+  },
+  "execution": {
+    "capital": 100000.0,
+    "risk_per_trade": 0.005,
+    "daily_loss_limit": 0.015,
+    "max_daily_trades": 3,
+    "spread": 0.35,
+    "slippage": 0.1,
+    "commission_per_oz": 0.1,
+    "min_position_oz": 0.01,
+    "max_hold_bars": 12,
+    "trailing_atr": 1.5
+  }
+}
