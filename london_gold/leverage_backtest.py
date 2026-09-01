@@ -20,8 +20,14 @@ import pandas as pd
 from london_gold.backtest import CostConfig, _fill_price
 
 
-def run_leverage_backtest(df: pd.DataFrame, cost: CostConfig, name: str = "") -> dict:
-    """Backtest a signal/stop/tp frame with margin-account leverage."""
+def run_leverage_backtest(df: pd.DataFrame, cost: CostConfig, name: str = "",
+                          leverage_series: np.ndarray | None = None) -> dict:
+    """Backtest a signal/stop/tp frame with margin-account leverage.
+
+    If ``leverage_series`` is supplied (per-bar leverage array), each opening
+    uses the leverage of the PREVIOUS bar (bar i-1); otherwise a fixed
+    ``cost.leverage`` is used.
+    """
     data = df.reset_index(drop=True)
     if "signal" not in data:
         raise ValueError("signal column required")
@@ -97,8 +103,12 @@ def run_leverage_backtest(df: pd.DataFrame, cost: CostConfig, name: str = "") ->
                 stop_dist = float(stop_dists[i - 1]) if not np.isnan(stop_dists[i - 1]) else 0.0
                 tp_dist = float(tp_dists[i - 1]) if not np.isnan(tp_dists[i - 1]) else 0.0
                 oz = cost.position_oz
-                if cost.leverage > 0 and entry_mid > 0:
-                    oz = cost.capital * cost.leverage / entry_mid
+                # per-bar leverage (uses previous bar's state), else fixed cost.leverage
+                lev = cost.leverage
+                if leverage_series is not None and i - 1 < len(leverage_series):
+                    lev = float(leverage_series[i - 1])
+                if lev > 0 and entry_mid > 0:
+                    oz = cost.capital * lev / entry_mid
                 if cost.risk_per_trade_pct > 0 and stop_dist > 0:
                     risk_oz = cost.capital * cost.risk_per_trade_pct / stop_dist
                     oz = min(oz, risk_oz)
