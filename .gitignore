@@ -1,9 +1,71 @@
+# ---------- Python ----------
 __pycache__/
-*.pyc
-data/london_gold_daily.csv
-data/london_gold_scan.json
-data/london_gold_scan_short.json
-data/gc_h1.csv
-data/test_london_gold_equity.svg
-reports/london_gold_*
-reports/gc_h1_*
+*.py[cod]
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Data (market data is large; keep out of repo) ----------
+data/
+*.csv
+*.jsonl
+*.parquet
+*.pickle
+*.h5
+*.feather
+
+# ---------- Logs ----------
+log/
+logs/
+*.log
+
+# ---------- Nested standalone git repos ----------
+# These are independent repositories (EA31337, QuantDinger, ths_trade, etc.)
+# and each has its own .git. Ignore them so the main repo tracks only itself.
+/EA31337/
+/EA31337-main/
+/finance-quant-skills/
+/QuantDinger/
+/ths_trade/
+/consultation_signal/
+/QMT/
+/consultation_signal.zip
+
+# ---------- Secrets: never commit real credentials ----------
+.env
+.env.*
+*.env
+*.env.*
+local.env
+!.env.example
+!*.env.example
+
+# ---------- Build / editor / OS ----------
+node_modules/
+dist/
+build/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ---------- Scratch / temp files in repo root ----------
+-- 
+tmp_*
+*.tmp
+test_out.txt
+tes_err.txt
+py_out.txt
+tmp_api.txt
+tmp.png
+
+# ---------- Local backtest artifacts not meant for sharing ----------
+reports/*
+!reports/.gitkeep
