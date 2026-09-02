@@ -58,6 +58,8 @@ def main():
     p.add_argument("--tp-pts", type=float, default=0.8)
     p.add_argument("--max-layers", type=int, default=6)
     p.add_argument("--equity-floor", type=float, default=0.30)
+    p.add_argument("--ema-fast", type=int, default=10, help="fast EMA for trend direction")
+    p.add_argument("--ema-slow", type=int, default=30, help="slow EMA for trend direction")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_grid_ma_log.csv"))
     args = p.parse_args()
@@ -95,6 +97,27 @@ def main():
                 bid = t.bid; ask = t.ask
                 ts = datetime.now().strftime("%H:%M:%S")
                 dd = (ai.balance - ai.equity) / ai.balance if ai and ai.balance > 0 else 0
+
+                # trend direction (M5 EMA fast vs slow): +1 up, -1 down, 0 neutral
+                trend = 0
+                r = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M5, 0, 60)
+                if r is not None and len(r) >= args.ema_slow:
+                    cl = np.array([c["close"] for c in r], dtype=float) if hasattr(r[0], "close") else None
+                    if cl is None:
+                        # pandas-free: r is a list of tuples? use dict access
+                        import pandas as pd
+                        df = pd.DataFrame(r)
+                        cl = df["close"].astype(float).to_numpy()
+                    def ewm(a, span):
+                        alpha = 2 / (span + 1)
+                        out = np.empty(len(a)); out[0] = a[0]
+                        for k in range(1, len(a)): out[k] = alpha * a[k] + (1 - alpha) * out[k - 1]
+                        return out
+                    ef = ewm(cl, args.ema_fast); es = ewm(cl, args.ema_slow)
+                    if cl[-1] > ef[-1] > es[-1]:
+                        trend = 1
+                    elif cl[-1] < ef[-1] < es[-1]:
+                        trend = -1
 
                 # equity floor
                 if args.equity_floor and pos and dd >= args.equity_floor:
@@ -138,11 +161,18 @@ def main():
                         if not args.dry_run:
                             open_order(args.symbol, lot, mt5.POSITION_TYPE_SELL, bid, 202606, "mart_short")
 
-                # ---- open fresh if completely flat ----
+                # ---- open fresh if completely flat, follow the trend direction ----
                 if not pos:
-                    log(ts, "OPEN", "开多 %s手 @%.2f (无仓)" % (args.base_lot, ask))
-                    if not args.dry_run:
-                        open_order(args.symbol, args.base_lot, mt5.POSITION_TYPE_BUY, ask, 202606, "open")
+                    if trend > 0:
+                        log(ts, "OPEN", "趋势涨(看涨) 开多 %s手 @%.2f" % (args.base_lot, ask))
+                        if not args.dry_run:
+                            open_order(args.symbol, args.base_lot, mt5.POSITION_TYPE_BUY, ask, 202606, "open_long")
+                    elif trend < 0:
+                        log(ts, "OPEN", "趋势跌(看跌) 开空 %s手 @%.2f" % (args.base_lot, bid))
+                        if not args.dry_run:
+                            open_order(args.symbol, args.base_lot, mt5.POSITION_TYPE_SELL, bid, 202606, "open_short")
+                    else:
+                        log(ts, "OPEN", "趋势中性 - 等方向(不盲目开仓)")
 
                 buy_lots = sum(x.volume for x in buys)
                 sell_lots = sum(x.volume for x in sells)
