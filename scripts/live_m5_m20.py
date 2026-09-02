@@ -80,6 +80,7 @@ def main():
     print("=" * 64)
     print("M5/M20 金叉死叉双向 运行中...")
     print("=" * 64)
+    last_sig = 0  # only act when the cross direction CHANGES (new cross), no repeat churn
     try:
         while True:
             try:
@@ -121,11 +122,8 @@ def main():
                 log(ts, "tick", "close=%.2f 多%.2f/空%.2f lot=%.2f sig=%+d" % (
                     px, buy_lots, sell_lots, base_lot, sig))
 
-                # ---- direction-flip semantics:
-                #      signal=+1 (看涨/金叉) -> 平掉所有空仓(Buy平空), 建立看涨多头;
-                #      signal=-1 (看跌/死叉) -> 平掉所有多仓(Sell平多), 建立看跌空头.
-                #      Every trigger closes the opposite side and opens the new direction.
-                if sig != 0:
+                # ---- direction-flip semantics; only act on a REAL new cross (sig changed) ----
+                if sig != 0 and sig != last_sig:
                     # close all positions that OPPOSE the signal direction
                     for x in pos:
                         oppose = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
@@ -146,6 +144,7 @@ def main():
                         "BUY" if sig > 0 else "SELL", base_lot, px0, sig))
                     if not args.dry_run:
                         send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
+                    last_sig = sig
             except Exception as e:  # noqa: BLE001
                 print("[%s] 异常: %s" % (datetime.now().strftime("%H:%M:%S"), e), flush=True)
             time.sleep(args.cycle_sec)
