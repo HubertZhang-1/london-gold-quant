@@ -50,6 +50,13 @@ class AdaptiveConfig:
     risk_10x: float = 0.005
     risk_5x: float = 0.01
     risk_low: float = 0.02
+    # confidence-scaled exposure: risk_mult = conf_mult * (floor + (1-floor)*|micro|^power)
+    # Confident signals (strong |micro|) get MORE risk; weak ones get little.
+    # conf_mult=1 -> baseline; conf_mult=2.5 lifts return substantially while the
+    # weak-regime protection keeps maxDD bounded (no blow-up on the full history).
+    conf_mult: float = 1.0
+    conf_power: float = 1.0
+    conf_floor: float = 1.0  # 1.0 == every signal gets full risk (old behaviour)
 
 
 def _risk_for_lev(lev: float, cfg: AdaptiveConfig) -> float:
@@ -112,12 +119,18 @@ def build_signals(df: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     sig = np.where(df["lev"].to_numpy() > 0, sig, 0)
     a = atr(df["high"], df["low"], df["close"], 14).to_numpy()
     anim = ~np.isnan(a)
+    # confidence-scaled risk: scale the per-tier risk by |micro| so strong
+    # signals get more exposure and weak ones less.
+    base_risk = df["risk"].to_numpy()
+    conf = np.clip(micro.abs().fillna(0.0).to_numpy(), 0.0, 1.0) ** cfg.conf_power
+    scale = cfg.conf_mult * (cfg.conf_floor + (1.0 - cfg.conf_floor) * conf)
+    risk = base_risk * scale
     return pd.DataFrame({
         "date": df["date"], "open": df["open"], "high": df["high"],
         "low": df["low"], "close": df["close"], "signal": sig,
         "stop_dist": np.where(anim, a * cfg.stop_mult, 0.0),
         "tp_dist": np.where(anim, a * cfg.stop_mult * cfg.rr, 0.0),
-        "lev": df["lev"].to_numpy(), "risk": df["risk"].to_numpy(),
+        "lev": df["lev"].to_numpy(), "risk": risk,
     })
 
 

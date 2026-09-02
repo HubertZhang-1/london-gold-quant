@@ -71,7 +71,8 @@ def main():
     df = pd.read_csv(args.csv, parse_dates=["date"])
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = df.sort_values("date").reset_index(drop=True)
-    cfg = AdaptiveConfig()
+    # Production config: confidence-scaled exposure (conf x2.5, floor 0.3).
+    cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3)
 
     prepared = prepare_daily(df, cfg)
     frame = build_signals(prepared, cfg)
@@ -89,6 +90,8 @@ def main():
     stop_dist = float(frame["stop_dist"].iloc[-1])
     tp_dist = float(frame["tp_dist"].iloc[-1])
     close = float(frame["close"].iloc[-1])
+    # actual confidence-scaled risk for this bar (reflects conf_mult/floor)
+    eff_risk = float(frame["risk"].iloc[-1])
 
     action = {0: "观望/空仓", 1: "做多", -1: "做空"}[sig]
 
@@ -97,7 +100,7 @@ def main():
     print(f"数据日期: {last['date'].date()}   收盘: ${close:,.1f}")
     print("=" * 60)
     print(f"市场状态 : {STATE_NAMES.get(state, state)}")
-    print(f"建议杠杆 : {lev:.0f}x   (单笔风险 {risk*100:.1f}%)")
+    print(f"建议杠杆 : {lev:.0f}x   (单笔风险 {risk*100:.1f}% → 信心缩放后 {eff_risk*100:.1f}%)")
     print(f"信号方向 : {action}   (micro score={micro:+.3f})")
     if stop_dist > 0 and sig != 0:
         direction = 1 if sig > 0 else -1
@@ -123,7 +126,8 @@ def main():
     out = PROJECT_ROOT / "data"
     snap = {
         "date": str(last["date"].date()), "close": close, "state": state,
-        "suggested_leverage": lev, "risk_pct": risk, "signal": sig, "micro": micro,
+        "suggested_leverage": lev, "risk_pct": risk, "eff_risk_pct": eff_risk,
+        "signal": sig, "micro": micro,
         "stop_dist": stop_dist, "tp_dist": tp_dist,
     }
     with open(out / "bull_adaptive_decision.json", "w", encoding="utf-8") as fh:

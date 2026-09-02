@@ -14,7 +14,9 @@ from london_gold.bull_adaptive import AdaptiveConfig, prepare_daily, build_signa
 D = pd.read_csv(r"C:\Users\张策\Documents\EA量化项目\data\XAUUSD_1d.csv", parse_dates=["date"])
 D["date"] = pd.to_datetime(D["date"], utc=True)
 D = D.sort_values("date").reset_index(drop=True)
-cfg = AdaptiveConfig()
+# Production config: confidence-scaled exposure (conf x2.5, floor 0.3).
+# See docs/bull_adaptive_strategy.md §收益弹性 for rationale.
+cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3)
 
 WINDOWS = [("2019", "2019-01-01", "2019-12-31"), ("2020", "2020-01-01", "2020-12-31"),
            ("2021", "2021-01-01", "2021-12-31"), ("2022", "2022-01-01", "2022-12-31"),
