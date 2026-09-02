@@ -138,46 +138,60 @@ def main() -> None:
                                         "type_time": mt5.ORDER_TIME_GTC,
                                         "type_filling": mt5.ORDER_FILLING_IOC})
 
-                # martingale add / tp / hedge logic (simplified, adaptive to live positions)
-                # add a layer when the main side has moved adversarially by 'step'
+                # martingale / trend-consistency logic (FIXED: only add with the trend,
+                # and close positions that OPPOSE the trend instead of riding them)
                 if pos:
                     main_side = 1 if buy_lots >= sell_lots else -1
                     main_avg = buy_avg if main_side > 0 else sell_avg
                     main_last = mt5.symbol_info_tick(args.symbol).bid if main_side > 0 else mt5.symbol_info_tick(args.symbol).ask
                     moved = (main_avg - main_last) if main_side > 0 else (main_last - main_avg)
                     layers = len(pos)
-                    # cooldown guard: don't avg-TP within N cycles of an add (avoid add->tp race)
                     now = time.time()
-                    if now - last_add_time >= args.tp_cooldown:
-                        added_this = False
-                        if layers < args.max_layers and moved >= step:
-                            tadd = mt5.POSITION_TYPE_BUY if main_side > 0 else mt5.POSITION_TYPE_SELL
-                            px = mt5.symbol_info_tick(args.symbol).ask if main_side > 0 else mt5.symbol_info_tick(args.symbol).bid
-                            log(ts, "martingale_add", f"层{layers+1} {args.base_lot}手 @{px:.2f} (反向{moved:.2f})")
+
+                    # 1) TREND-CONSISTENCY: if the open side now OPPOSES the trend, close it
+                    if trend != 0 and main_side != trend:
+                        log(ts, "trend_flip", f"趋势{trend:+d}与持仓{'多' if main_side>0 else '空'}相反 - 平该侧仓位")
+                        if not args.dry_run:
+                            for p in pos:
+                                if (p.type == mt5.POSITION_TYPE_BUY and main_side > 0) or \
+                                   (p.type == mt5.POSITION_TYPE_SELL and main_side < 0):
+                                    mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
+                                                    "volume": p.volume,
+                                                    "type": mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+                                                    "price": mt5.symbol_info_tick(args.symbol).bid if p.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask,
+                                                    "deviation": 40, "magic": 202602, "position": p.ticket,
+                                                    "comment": "trend_flip", "type_time": mt5.ORDER_TIME_GTC,
+                                                    "type_filling": mt5.ORDER_FILLING_IOC})
+                    # 2) ADD only WITH the trend (never against it)
+                    elif trend != 0 and main_side == trend and \
+                            now - last_add_time >= args.tp_cooldown and \
+                            layers < args.max_layers and moved >= step:
+                        tadd = mt5.POSITION_TYPE_BUY if main_side > 0 else mt5.POSITION_TYPE_SELL
+                        px = mt5.symbol_info_tick(args.symbol).ask if main_side > 0 else mt5.symbol_info_tick(args.symbol).bid
+                        log(ts, "martingale_add", f"顺势 层{layers+1} {args.base_lot}手 @{px:.2f} (反向{moved:.2f})")
+                        if not args.dry_run:
+                            mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
+                                            "volume": args.base_lot, "type": tadd, "price": px,
+                                            "deviation": 40, "magic": 202602, "comment": "grid_add",
+                                            "type_time": mt5.ORDER_TIME_GTC,
+                                            "type_filling": mt5.ORDER_FILLING_IOC})
+                        last_add_time = now
+                    # 3) average-entry TP: only after cooldown, only on a real gain
+                    elif now - last_add_time >= args.tp_cooldown and layers > 0:
+                        gain = (main_avg - main_last) if main_side > 0 else (main_last - main_avg)
+                        if gain >= step * args.tp_atr:
+                            log(ts, "avg_tp", f"主侧均价回正 {gain:.2f}% - 平主仓")
                             if not args.dry_run:
-                                mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
-                                                "volume": args.base_lot, "type": tadd, "price": px,
-                                                "deviation": 40, "magic": 202602, "comment": "grid_add",
-                                                "type_time": mt5.ORDER_TIME_GTC,
-                                                "type_filling": mt5.ORDER_FILLING_IOC})
-                            last_add_time = now
-                            added_this = True
-                        # average-entry TP: only after the cooldown, and only on a real gain
-                        if not added_this and layers > 0:
-                            gain = (main_avg - main_last) if main_side > 0 else (main_last - main_avg)
-                            if gain >= step * args.tp_atr:
-                                log(ts, "avg_tp", f"主侧均价回正 {gain:.2f}% - 平主仓")
-                                if not args.dry_run:
-                                    for p in pos:
-                                        if (p.type == mt5.POSITION_TYPE_BUY and main_side > 0) or \
-                                           (p.type == mt5.POSITION_TYPE_SELL and main_side < 0):
-                                            mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
-                                                            "volume": p.volume,
-                                                            "type": mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
-                                                            "price": mt5.symbol_info_tick(args.symbol).bid if p.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask,
-                                                            "deviation": 40, "magic": 202602, "position": p.ticket,
-                                                            "comment": "grid_tp", "type_time": mt5.ORDER_TIME_GTC,
-                                                            "type_filling": mt5.ORDER_FILLING_IOC})
+                                for p in pos:
+                                    if (p.type == mt5.POSITION_TYPE_BUY and main_side > 0) or \
+                                       (p.type == mt5.POSITION_TYPE_SELL and main_side < 0):
+                                        mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
+                                                        "volume": p.volume,
+                                                        "type": mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+                                                        "price": mt5.symbol_info_tick(args.symbol).bid if p.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask,
+                                                        "deviation": 40, "magic": 202602, "position": p.ticket,
+                                                        "comment": "grid_tp", "type_time": mt5.ORDER_TIME_GTC,
+                                                        "type_filling": mt5.ORDER_FILLING_IOC})
             except Exception as e:  # noqa: BLE001
                 print(f"[{datetime.now():%H:%M:%S}] 决策异常: {e}", flush=True)
             time.sleep(args.cycle_sec)
