@@ -62,6 +62,8 @@ def main() -> None:
     parser.add_argument("--hedge-atr", type=float, default=1.6)
     parser.add_argument("--tp-cooldown", type=float, default=120.0,
                         help="seconds to wait after a martingale add before avg-TP can fire")
+    parser.add_argument("--trend-ema-fast", type=int, default=10)
+    parser.add_argument("--trend-ema-slow", type=int, default=30)
     parser.add_argument("--base-lot", type=float, default=0.1)
     parser.add_argument("--target-leverage", type=float, default=None,
                         help="if set, base lot = leverage * account_equity / (price * 100 oz); "
@@ -123,8 +125,16 @@ def main() -> None:
                 a_now = float(a.iloc[-1]) if not np.isnan(a.iloc[-1]) else 1.0
                 step = a_now * args.grid_atr
                 last_close = float(o["close"].iloc[-1])
-                trend = 1 if o["close"].iloc[-1] > o["close"].iloc[-args.atr_bars] else \
-                        (-1 if o["close"].iloc[-1] < o["close"].iloc[-args.atr_bars] else 0)
+                # EMA-based trend (smoother than a 14-bar slope, avoids flip-flopping
+                # in a one-way move). Up if close > ema_fast and ema_fast > ema_slow.
+                ema_fast = float(pd.Series(o["close"]).ewm(span=args.trend_ema_fast, adjust=False).mean().iloc[-1])
+                ema_slow = float(pd.Series(o["close"]).ewm(span=args.trend_ema_slow, adjust=False).mean().iloc[-1])
+                ema_prev = float(pd.Series(o["close"]).ewm(span=args.trend_ema_slow, adjust=False).mean().iloc[-2])
+                trend = 0
+                if last_close > ema_fast > ema_slow and ema_slow >= ema_prev:
+                    trend = 1
+                elif last_close < ema_fast < ema_slow and ema_slow <= ema_prev:
+                    trend = -1
 
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 buy_lots = sum(p.volume for p in pos if p.type == mt5.POSITION_TYPE_BUY)
