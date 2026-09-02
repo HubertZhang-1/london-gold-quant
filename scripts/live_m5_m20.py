@@ -49,6 +49,8 @@ def main():
     p.add_argument("--target-leverage", type=float, default=5.0)
     p.add_argument("--lot-size", type=float, default=0.3, help="fixed lot per trade (0.3)")
     p.add_argument("--noise-amp", type=float, default=5.0, help="skip any cross whose recent 6-bar swing < this")
+    p.add_argument("--min-sep", type=float, default=0.6, help="skip a cross if MA5-MA20 separation < this (方向不明)")
+    p.add_argument("--min-body", type=float, default=0.8, help="skip a cross if candle body < this (小实体噪声)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_m5_m20_log.csv"))
     args = p.parse_args()
@@ -98,16 +100,13 @@ def main():
                         sig = 1
                     elif spread_ma[-1] < 0 and spread_ma[-2] >= 0:
                         sig = -1
-                # ---- K-line noise correction ----
-                # a cross inside a tight MA-blend (small separation) or a small candle
-                # body is likely chop -> treat as noise, skip it (只做明确的拐点).
+                # ---- K-line noise correction (强过滤, 依据统计: 平均间隔9点/中位5.3点/大量<1点噪声;
+                #      交叉瞬间分离度仅0.6点, 方向不明 -> 用摆动+实体+分离度过滤) ----
                 if sig != 0:
-                    sep = abs(spread_ma[-1]) if len(spread_ma) else 0.0
-                    body = abs(float(close.iloc[-1]) - float(d["open"].iloc[-1]))
                     ma_dist = abs(float(f.iloc[-1]) - float(s.iloc[-1]))
-                    # noise: separation tiny / candle body tiny / recent swing small
+                    body = abs(float(close.iloc[-1]) - float(d["open"].iloc[-1]))
                     swing = float(high.tail(6).max() - low.tail(6).min())
-                    noisy = (ma_dist < 0.6) or (body < 0.8) or (swing < args.noise_amp)
+                    noisy = (ma_dist < args.min_sep) or (body < args.min_body) or (swing < args.noise_amp)
                     if noisy:
                         log(ts, "noise_skip", "K线噪声: ma_dist=%.2f body=%.2f swing=%.2f 跳过" % (
                             ma_dist, body, swing))
