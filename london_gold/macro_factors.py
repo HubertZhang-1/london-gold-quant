@@ -30,7 +30,6 @@ def macro_direction_score(macro: pd.DataFrame, tnx_window: int = 60,
     dxy = out["dxy"]
     tnx = out["tnx"]
     vix = out["vix"]
-
     # Changes over a rolling window, normalized by rolling std
     dxy_chg = dxy.diff(dxy_window) / (dxy.rolling(dxy_window).std() + 1e-9)
     tnx_chg = tnx.diff(tnx_window) / (tnx.rolling(tnx_window).std() + 1e-9)
@@ -54,6 +53,10 @@ def macro_direction_score(macro: pd.DataFrame, tnx_window: int = 60,
     out["yield_chg"] = yield_contrib
     out["dxy_chg"] = dxy_contrib
     out["vix_gate"] = vix_contrib
+    # Align the frame to tz-aware date index so forward_fill_macro (which keys on
+    # the Series index) can map the daily macro score onto gold-bar dates. Without
+    # this the macro_score Series had a RangeIndex and ffilled to a constant.
+    out.index = out["date"]
     return out
 
 

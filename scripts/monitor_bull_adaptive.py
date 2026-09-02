@@ -28,6 +28,7 @@ from london_gold.bull_adaptive import (  # noqa: E402
     MICRO_W,
     AdaptiveConfig,
     _lev_risk,
+    apply_macro_leverage,
     build_signals,
     prepare_daily,
 )
@@ -71,19 +72,38 @@ def main():
     df = pd.read_csv(args.csv, parse_dates=["date"])
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = df.sort_values("date").reset_index(drop=True)
-    # Production config: confidence-scaled exposure (conf x2.5, floor 0.3).
-    cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3)
+    # Production config: confidence-scaled exposure (conf x2.5, floor 0.3) +
+    # macro risk-dampening (bearish macro -> lower leverage).
+    cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3,
+                         macro_lev_lo=0.5, macro_lev_hi=1.0)
 
     prepared = prepare_daily(df, cfg)
     frame = build_signals(prepared, cfg)
+
+    last = prepared.iloc[-1]
+    state, lev, risk = classify(last, cfg)
+
+    # macro direction score (forward-filled onto the daily bars) for dampening display
+    macro_val = None
+    eff_lev = lev
+    macro_path = PROJECT_ROOT / "data" / "macro_daily.csv"
+    if macro_path.is_file():
+        import pandas as _pd
+        from london_gold.macro_factors import forward_fill_macro, macro_direction_score
+        md = _pd.read_csv(macro_path, parse_dates=["date"])
+        md["date"] = _pd.to_datetime(md["date"], utc=True)
+        md = md.sort_values("date").reset_index(drop=True)
+        macro_series = forward_fill_macro(macro_direction_score(md)["macro_score"],
+                                          df["date"].to_numpy())
+        macro_val = float(macro_series.iloc[-1])
+        # apply macro dampening to leverage/risk for the last bar display
+        frame = apply_macro_leverage(frame, macro_series, cfg)
+        eff_lev = float(frame["lev"].iloc[-1])
 
     # compute micro score (factor composite) for a fuller readout
     fac = build_factors(df)
     micro_series = aggregate_score(fac, MICRO_W)
     micro = float(micro_series.iloc[-1])
-
-    last = prepared.iloc[-1]
-    state, lev, risk = classify(last, cfg)
 
     # Recommend the SIGNAL (micro score sign) as of last close; signal is 0/-1/+1
     sig = int(frame["signal"].iloc[-1])
@@ -100,7 +120,11 @@ def main():
     print(f"数据日期: {last['date'].date()}   收盘: ${close:,.1f}")
     print("=" * 60)
     print(f"市场状态 : {STATE_NAMES.get(state, state)}")
-    print(f"建议杠杆 : {lev:.0f}x   (单笔风险 {risk*100:.1f}% → 信心缩放后 {eff_risk*100:.1f}%)")
+    if macro_val is not None:
+        print(f"建议杠杆 : {lev:.0f}x  → 宏观降档后 {eff_lev:.1f}x   (单笔风险 {risk*100:.1f}% → 信心缩放后 {eff_risk*100:.1f}%)")
+        print(f"宏观方向 : {macro_val:+.2f}   (DXY/10Y/VIX; 偏空则自动降杠杆)")
+    else:
+        print(f"建议杠杆 : {lev:.0f}x   (单笔风险 {risk*100:.1f}% → 信心缩放后 {eff_risk*100:.1f}%)")
     print(f"信号方向 : {action}   (micro score={micro:+.3f})")
     if stop_dist > 0 and sig != 0:
         direction = 1 if sig > 0 else -1

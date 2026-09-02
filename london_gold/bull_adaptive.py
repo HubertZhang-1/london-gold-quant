@@ -57,6 +57,13 @@ class AdaptiveConfig:
     conf_mult: float = 1.0
     conf_power: float = 1.0
     conf_floor: float = 1.0  # 1.0 == every signal gets full risk (old behaviour)
+    # macro risk-dampening: scale leverage DOWN when the macro score is bearish.
+    # lev_mult maps macro[-1,+1] -> [macro_lev_lo, macro_lev_hi]; bearish macro ->
+    # low leverage, bullish -> high. Unknown macro (pre-macro-data) => mult=1.0.
+    # This trims drawdown while keeping bull-era upside, unlike a hard gate that
+    # zeroes leverage and forfeits return. Disable by setting lo=hi=1.0.
+    macro_lev_lo: float = 1.0
+    macro_lev_hi: float = 1.0
 
 
 def _risk_for_lev(lev: float, cfg: AdaptiveConfig) -> float:
@@ -134,10 +141,45 @@ def build_signals(df: pd.DataFrame, cfg: AdaptiveConfig) -> pd.DataFrame:
     })
 
 
-def run_adaptive(df: pd.DataFrame, cfg: AdaptiveConfig) -> dict:
-    """Run the adaptive-leverage circuit-breaker strategy and return stats+artifacts."""
+def apply_macro_leverage(frame: pd.DataFrame, macro_series, cfg: AdaptiveConfig) -> pd.DataFrame:
+    """Scale leverage down when the macro score is bearish (risk-dampening).
+
+    ``macro_series`` must align with ``frame`` (one value per bar, already
+    forward-filled / reindexed to the gold bar dates; unknown/NA -> neutral).
+    lev_mult maps macro[-1,+1] -> [macro_lev_lo, macro_lev_hi]:
+      macro=+1 -> macro_lev_hi, macro=-1 -> macro_lev_lo, linear in between.
+    Unknown (NaN) / disabled (lo=hi=1.0) -> mult 1.0 (no change). Risk is scaled
+    down in lockstep with leverage so the per-bar risk stays proportional.
+    """
+    out = frame.copy()
+    base_lev = out["lev"].to_numpy()
+    if macro_series is None:
+        return out
+    mac = np.asarray(pd.Series(macro_series).to_numpy(), dtype=float)
+    if cfg.macro_lev_lo == cfg.macro_lev_hi:
+        return out
+    m = np.clip(np.nan_to_num(mac, nan=0.0), -1.0, 1.0)
+    mult = cfg.macro_lev_lo + (cfg.macro_lev_hi - cfg.macro_lev_lo) * (m + 1.0) / 2.0
+    # NaN macro (pre-data) -> treat as neutral (mult=1.0)
+    mult = np.where(np.isnan(mac), 1.0, mult)
+    lev = np.where(base_lev > 0, np.maximum(base_lev * mult, 0.0), base_lev)
+    out["lev"] = lev
+    # scale risk down proportionally (clamp at sensible floor) so we never add risk
+    risk = out["risk"].to_numpy()
+    out["risk"] = risk * np.where(base_lev > 0, np.clip(mult, 0.2, 1.0), 1.0)
+    return out
+
+
+def run_adaptive(df: pd.DataFrame, cfg: AdaptiveConfig, macro_series=None) -> dict:
+    """Run the adaptive-leverage circuit-breaker strategy and return stats+artifacts.
+
+    ``macro_series`` (optional) is the macro direction score aligned to ``df``
+    dates; it risk-dampens leverage when bearish (see ``apply_macro_leverage``).
+    """
     prepared = prepare_daily(df, cfg)
     frame = build_signals(prepared, cfg)
+    if macro_series is not None:
+        frame = apply_macro_leverage(frame, macro_series, cfg)
     cost = CostConfig(capital=cfg.capital, position_oz=cfg.position_oz,
                       spread=cfg.spread, slippage=cfg.slippage,
                       commission_per_oz=cfg.commission_per_oz,
