@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .indicators import atr, trend_regime
+from .indicators import atr, market_state, trend_regime
 from .macro_factors import forward_fill_macro
 
 
@@ -54,6 +54,17 @@ class BullGridConfig:
     macro_lev_hi: float = 1.0        # multiplier at macro=+1 (1.0 disables)
     risk_per_trade_pct: float = 0.0  # if >0, size lots so a full stop loses this % of balance
                                      # (0.0 -> fixed base_lot)
+    # market-rhythm (choppiness) gate: only enter longs when the rhythm classifier
+    # sees a confirmed UP trend; stand aside in chop (esp. the 2026 H1 decline).
+    # Defaults are the BALANCED setting (keeps most bull-era upside while filtering
+    # the worst chop); tighten/loosen via these knobs.
+    rhythm_gate: bool = True
+    rhythm_era_window: int = 20      # efficiency-ratio window
+    rhythm_er_thr: float = 0.10
+    rhythm_adx_window: int = 14
+    rhythm_adx_thr: float = 16.0
+    rhythm_ema_window: int = 50
+    chop_hi: float = 68.0            # choppiness index above this = range (stand aside)
 
 
 def _fill(mid: float, side: int, spread: float, slippage: float = 0.0) -> float:
@@ -98,6 +109,18 @@ def run_bull_grid_backtest(df: pd.DataFrame, config: BullGridConfig | None = Non
     atr14 = atr(high, low, close, window=config.atr_bars).to_numpy()
 
     bull = _bull_score(close, high, low, config)
+
+    # market-rhythm gate: only allow longs when the rhythm classifier says UP trend
+    if config.rhythm_gate:
+        rhythm = market_state(close, high, low,
+                              er_window=config.rhythm_era_window,
+                              er_thr=config.rhythm_er_thr,
+                              adx_window=config.rhythm_adx_window,
+                              adx_thr=config.rhythm_adx_thr,
+                              chop_hi=config.chop_hi,
+                              ema_window=config.rhythm_ema_window)["signal"].to_numpy()
+    else:
+        rhythm = np.ones(len(data))
 
     # macro: if supplied, map macro[-1,1] -> [lo, hi] lot multiplier
     macro = np.ones(len(data))
@@ -173,8 +196,9 @@ def run_bull_grid_backtest(df: pd.DataFrame, config: BullGridConfig | None = Non
             pending_long = False
 
         # ---- generate signal from THIS bar for next bar ----
-        # only longs, only when bull-regime confirmed
-        bull_long = bull[i] >= config.bull_thr and c > o
+        # only longs, only when bull-regime confirmed AND (if rhythm gate on) the
+        # market rhythm is a confirmed UP trend (stand aside in chop / range).
+        bull_long = bull[i] >= config.bull_thr and c > o and rhythm[i] >= 1
         pending_long = bool(bull_long)
 
         equity_rows.append({

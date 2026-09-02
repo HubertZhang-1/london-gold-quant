@@ -177,3 +177,63 @@ def chaikin_osc(high: pd.Series, low: pd.Series, close: pd.Series,
     mfv = mfm.fillna(0.0) * volume.fillna(0.0)
     adl = mfv.cumsum()
     return ema(adl, fast) - ema(adl, slow)
+
+
+def choppiness_index(high: pd.Series, low: pd.Series, close: pd.Series,
+                     window: int = 14, atr_window: int = 14) -> pd.Series:
+    """Choppiness Index (0..100). High = range/choppy, low = directional trend.
+
+    CHOP = 100 * log10( sum(TR, window) / (max(high,window)-min(low,window)) ) / log10(window)
+    Interpretation: > 61.8 = choppy/range, < 38.2 = trending, else neutral.
+    """
+    tr = true_range(high, low, close)
+    hh = high.rolling(window).max()
+    ll = low.rolling(window).min()
+    denom = (hh - ll).replace(0, np.nan)
+    ratio = tr.rolling(window).sum() / denom
+    out = 100.0 * (np.log10(ratio) / np.log10(window))
+    return out.clip(0.0, 100.0)
+
+
+def market_state(close: pd.Series, high: pd.Series, low: pd.Series,
+                 er_window: int = 20, er_thr: float = 0.15,
+                 adx_window: int = 14, adx_thr: float = 20.0,
+                 chop_window: int = 14, chop_hi: float = 61.8, chop_lo: float = 38.2,
+                 ema_window: int = 50) -> pd.DataFrame:
+    """Classify each bar's market RHYTHM into a state + direction -> a buy/sell signal.
+
+    This is the "行情节奏识别器" (market-rhythm identifier): it distinguishes a
+    clean directional trend from a choppy/range market, and returns which way the
+    trend points. It composes three independent measures:
+      - Choppiness Index  : high -> range (choppy), low -> trending
+      - Efficiency ratio  : high -> clean directional, low -> noisy chop
+      - ADX               : trend strength
+    Final direction comes from the EMA slope, cross-checked by price-vs-EMA.
+
+    Returns a DataFrame with:
+      state   : "trend" | "chop" | "neutral"
+      dir_    : +1 (up), -1 (down), 0 (flat)
+      signal  : the tradeable signal (+1 long-only trend, -1 short, 0 stay flat)
+      chop    : raw choppiness index
+      er      : efficiency ratio
+      adx     : ADX
+    """
+    chop = choppiness_index(high, low, close, window=chop_window)
+    er = efficiency_ratio(close, er_window)
+    adx_ = adx(high, low, close, adx_window)
+    ema_ = ema(close, ema_window)
+    slope = ema_.diff(max(1, ema_window // 5))
+
+    trending = (chop < chop_hi) & (chop > 0) & (er >= er_thr) & (adx_ >= adx_thr)
+    choppy = (chop >= chop_hi) | (er < 0.5 * er_thr) | (adx_ < 0.5 * adx_thr)
+
+    dir_ = np.where(slope > 0, 1, np.where(slope < 0, -1, 0))
+    # only up-trend counts as long-friendly for a bull-only system
+    state = np.where(trending, "trend", np.where(choppy, "chop", "neutral"))
+    # signal: long only when in a confirmed UP trend; flat otherwise.
+    signal = np.where((trending) & (dir_ > 0), 1,
+                      np.where((trending) & (dir_ < 0), -1, 0))
+    return pd.DataFrame({
+        "state": state, "dir": dir_, "signal": signal,
+        "chop": chop, "er": er, "adx": adx_,
+    })
