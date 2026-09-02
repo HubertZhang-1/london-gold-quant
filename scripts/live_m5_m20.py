@@ -117,29 +117,33 @@ def main():
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
                 px = float(close.iloc[-1])
-                base_lot = args.lot_size  # fixed 0.3 per trade (multi-position allowed)
+                base_lot = args.lot_size  # fixed 0.3 per trade
 
                 log(ts, "tick", "close=%.2f 多%.2f/空%.2f lot=%.2f sig=%+d" % (
                     px, buy_lots, sell_lots, base_lot, sig))
 
-                # ---- multiple concurrent: on a fresh cross, open a new 0.3-lot; if an
-                #      opposite signal appears, close the opposite-direction positions ----
-                cur = 1 if buy_lots > 0 else (-1 if sell_lots > 0 else 0)
+                # ---- direction-flip semantics:
+                #      signal=+1 (看涨/金叉) -> 平掉所有空仓(Buy平空), 建立看涨多头;
+                #      signal=-1 (看跌/死叉) -> 平掉所有多仓(Sell平多), 建立看跌空头.
+                #      Every trigger closes the opposite side and opens the new direction.
                 if sig != 0:
-                    if cur != 0 and sig != cur:
-                        log(ts, "flip", "反向信号%+d - 平掉%+d方向仓位" % (sig, cur))
-                        for x in pos:
-                            opp = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
-                                  (x.type == mt5.POSITION_TYPE_SELL and sig > 0)
-                            if opp:
-                                ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                                cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
-                                if not args.dry_run:
-                                    send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_flip")
-                    # open a new 0.3-lot in signal direction (allows multiple concurrent)
+                    # close all positions that OPPOSE the signal direction
+                    for x in pos:
+                        oppose = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
+                                 (x.type == mt5.POSITION_TYPE_SELL and sig > 0)
+                        if oppose:
+                            ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                            cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
+                            log(ts, "close_opposite", "信号%+d - 平反向仓 %s %.2f手 @%.2f" % (
+                                sig, "BUY" if x.type == 0 else "SELL", x.volume, cpx))
+                            if not args.dry_run:
+                                send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_close")
+                        else:
+                            log(ts, "stash", "保留同向仓 (信号%+d)" % sig)
+                    # open a NEW 0.3-lot in the signal direction (multi-position allowed)
                     otype = mt5.POSITION_TYPE_BUY if sig > 0 else mt5.POSITION_TYPE_SELL
                     px0 = mt5.symbol_info_tick(args.symbol).ask if sig > 0 else mt5.symbol_info_tick(args.symbol).bid
-                    log(ts, "open", "%s %.2f手 @%.2f (信号%+d)" % (
+                    log(ts, "open", "%s %.2f手 @%.2f (看涨/看跌%+d)" % (
                         "BUY" if sig > 0 else "SELL", base_lot, px0, sig))
                     if not args.dry_run:
                         send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
