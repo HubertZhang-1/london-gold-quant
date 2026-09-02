@@ -51,6 +51,7 @@ def main():
     p.add_argument("--noise-amp", type=float, default=5.0, help="skip any cross whose recent 6-bar swing < this")
     p.add_argument("--min-sep", type=float, default=0.6, help="skip a cross if MA5-MA20 separation < this (方向不明)")
     p.add_argument("--min-body", type=float, default=0.8, help="skip a cross if candle body < this (小实体噪声)")
+    p.add_argument("--confirm-bars", type=int, default=2, help="delay N M5 bars after a cross; only enter if the price keeps moving the cross direction")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_m5_m20_log.csv"))
     args = p.parse_args()
@@ -81,6 +82,7 @@ def main():
     print("M5均线(5分钟周期) vs M20均线(20分钟周期) 金叉死叉双向 运行中...")
     print("=" * 64)
     last_sig = 0  # only act when the cross direction CHANGES (new cross), no repeat churn
+    pending = None  # (dir, price_at_cross) — a cross awaiting delay-confirmation
     try:
         while True:
             try:
@@ -140,29 +142,64 @@ def main():
                 log(ts, "tick", "close=%.2f 多%.2f/空%.2f lot=%.2f sig=%+d" % (
                     px, buy_lots, sell_lots, base_lot, sig))
 
-                # ---- direction-flip semantics; only act on a REAL new cross (sig changed) ----
+                # ---- delay-confirmation + direction-flip semantics ----
+                # when a fresh cross is detected (sig changed), record a pending entry; only
+                # open after `confirm-bars` M5 bars IF price kept moving the cross direction.
                 if sig != 0 and sig != last_sig:
-                    # close all positions that OPPOSE the signal direction
-                    for x in pos:
-                        oppose = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
-                                 (x.type == mt5.POSITION_TYPE_SELL and sig > 0)
-                        if oppose:
-                            ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                            cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
-                            log(ts, "close_opposite", "信号%+d - 平反向仓 %s %.2f手 @%.2f" % (
-                                sig, "BUY" if x.type == 0 else "SELL", x.volume, cpx))
+                    # fresh cross: queue it for confirmation instead of opening immediately
+                    if args.confirm_bars > 0:
+                        pending = {"dir": sig, "px0": float(close.iloc[-1]),
+                                   "bar0": len(d5)}
+                        log(ts, "cross_detect", "检测到%+d交叉, 等待%d根确认后再进" % (sig, args.confirm_bars))
+                        last_sig = sig
+                    else:
+                        # no delay: act immediately (close opposite + open new direction)
+                        for x in pos:
+                            oppose = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
+                                     (x.type == mt5.POSITION_TYPE_SELL and sig > 0)
+                            if oppose:
+                                ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                                cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
+                                log(ts, "close_opposite", "信号%+d - 平反向仓 %s %.2f手 @%.2f" % (
+                                    sig, "BUY" if x.type == 0 else "SELL", x.volume, cpx))
+                                if not args.dry_run:
+                                    send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_close")
+                        otype = mt5.POSITION_TYPE_BUY if sig > 0 else mt5.POSITION_TYPE_SELL
+                        px0 = mt5.symbol_info_tick(args.symbol).ask if sig > 0 else mt5.symbol_info_tick(args.symbol).bid
+                        log(ts, "open", "%s %.2f手 @%.2f (看涨/看跌%+d)" % (
+                            "BUY" if sig > 0 else "SELL", base_lot, px0, sig))
+                        if not args.dry_run:
+                            send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
+                        last_sig = sig
+
+                # ---- evaluate a pending signal (delay confirmation) ----
+                elif pending is not None:
+                    dirn = pending["dir"]
+                    bars_elapsed = len(d5) - pending["bar0"]
+                    price_moved = (float(close.iloc[-1]) - pending["px0"]) * dirn
+                    sep_ok = abs(spread_ma[-1]) >= args.min_sep
+                    if bars_elapsed >= max(1, args.confirm_bars):
+                        if price_moved > 0 and sep_ok:
+                            # confirmed: close opposite + open new direction
+                            for x in pos:
+                                oppose = (x.type == mt5.POSITION_TYPE_BUY and dirn < 0) or \
+                                         (x.type == mt5.POSITION_TYPE_SELL and dirn > 0)
+                                if oppose:
+                                    ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                                    cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
+                                    log(ts, "close_opposite", "确认%+d - 平反向仓" % dirn)
+                                    if not args.dry_run:
+                                        send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_close")
+                            otype = mt5.POSITION_TYPE_BUY if dirn > 0 else mt5.POSITION_TYPE_SELL
+                            px0 = mt5.symbol_info_tick(args.symbol).ask if dirn > 0 else mt5.symbol_info_tick(args.symbol).bid
+                            log(ts, "open", "确认%+d后进 %s %.2f手 @%.2f" % (
+                                dirn, "BUY" if dirn > 0 else "SELL", base_lot, px0))
                             if not args.dry_run:
-                                send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_close")
+                                send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
                         else:
-                            log(ts, "stash", "保留同向仓 (信号%+d)" % sig)
-                    # open a NEW 0.3-lot in the signal direction (multi-position allowed)
-                    otype = mt5.POSITION_TYPE_BUY if sig > 0 else mt5.POSITION_TYPE_SELL
-                    px0 = mt5.symbol_info_tick(args.symbol).ask if sig > 0 else mt5.symbol_info_tick(args.symbol).bid
-                    log(ts, "open", "%s %.2f手 @%.2f (看涨/看跌%+d)" % (
-                        "BUY" if sig > 0 else "SELL", base_lot, px0, sig))
-                    if not args.dry_run:
-                        send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
-                    last_sig = sig
+                            log(ts, "confirm_fail", "%+d未获确认(价%.2f/分离%.2f) - 放弃" % (
+                                dirn, price_moved, spread_ma[-1]))
+                        pending = None
             except Exception as e:  # noqa: BLE001
                 print("[%s] 异常: %s" % (datetime.now().strftime("%H:%M:%S"), e), flush=True)
             time.sleep(args.cycle_sec)
