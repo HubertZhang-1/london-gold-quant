@@ -89,6 +89,9 @@ def main() -> None:
                    help="after activation, close when profit retraces this many "
                         "(M1) ATR below its peak -> locks in gains, avoids give-back")
     p.add_argument("--max-unreal-loss-pct", type=float, default=0.05)
+    p.add_argument("--min-trend-strength", type=float, default=0.0,
+                   help="only open when the EMA-slow 6-bar spread >= this (filters weak "
+                        "trends; e.g. 1.5 means a real trend). 0 disables.")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_follow_log.csv"))
     args = p.parse_args()
@@ -128,7 +131,13 @@ def main() -> None:
                 if rates is None or len(rates) < 60:
                     time.sleep(args.cycle_sec); continue
                 o = ohlc(rates)
-                trend = ema_trend(pd.Series(o["close"]), args.ema_fast, args.ema_slow)
+                close_s = pd.Series(o["close"])
+                trend = ema_trend(close_s, args.ema_fast, args.ema_slow)
+                # trend strength: EMA-slow 6-bar spread (a real trend pulls it apart)
+                es6 = close_s.ewm(span=args.ema_slow, adjust=False).mean().tail(6).tolist()
+                strength = max(es6) - min(es6)
+                # only allow a NEW entry when the trend is strong enough (filays weak/choppy)
+                entry_ok = (args.min_trend_strength <= 0) or (strength >= args.min_trend_strength)
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
@@ -138,13 +147,13 @@ def main() -> None:
 
                 ts = datetime.now().strftime("%H:%M:%S")
                 log(ts, "tick", f"close={o['close'].iloc[-1]:.2f} trend={trend:+d} "
-                                f"多{buy_lots:.2f}/空{sell_lots:.2f} lot={base_lot:.2f}")
+                                f"strength={strength:.2f} 多{buy_lots:.2f}/空{sell_lots:.2f} lot={base_lot:.2f}")
 
                 # --- decide the target direction based on trend ---
                 target_side = 0
-                if trend == 1:
+                if entry_ok and trend == 1:
                     target_side = 1
-                elif trend == -1:
+                elif entry_ok and trend == -1:
                     target_side = -1
 
                 # --- if flat and a clear trend, open ---
