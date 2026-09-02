@@ -47,7 +47,8 @@ def main():
     p.add_argument("--fast", type=int, default=5)
     p.add_argument("--slow", type=int, default=20)
     p.add_argument("--target-leverage", type=float, default=5.0)
-    p.add_argument("--noise-amp", type=float, default=0.0, help="skip turns whose prior 6-bar swing < this")
+    p.add_argument("--lot-size", type=float, default=0.3, help="fixed lot per trade (0.3)")
+    p.add_argument("--noise-amp", type=float, default=5.0, help="skip any cross whose recent 6-bar swing < this")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_m5_m20_log.csv"))
     args = p.parse_args()
@@ -90,43 +91,55 @@ def main():
                 f = close.ewm(span=args.fast, adjust=False).mean()
                 s = close.ewm(span=args.slow, adjust=False).mean()
                 spread_ma = (f - s).to_numpy()
+                ts = datetime.now().strftime("%H:%M:%S")
                 sig = 0
                 if len(spread_ma) >= 2:
                     if spread_ma[-1] > 0 and spread_ma[-2] <= 0:
                         sig = 1
                     elif spread_ma[-1] < 0 and spread_ma[-2] >= 0:
                         sig = -1
-                # noise filter
-                if sig != 0 and args.noise_amp > 0:
-                    amp = float(high.tail(6).max() - low.tail(6).min())
-                    if amp < args.noise_amp:
+                # ---- K-line noise correction ----
+                # a cross inside a tight MA-blend (small separation) or a small candle
+                # body is likely chop -> treat as noise, skip it (只做明确的拐点).
+                if sig != 0:
+                    sep = abs(spread_ma[-1]) if len(spread_ma) else 0.0
+                    body = abs(float(close.iloc[-1]) - float(d["open"].iloc[-1]))
+                    ma_dist = abs(float(f.iloc[-1]) - float(s.iloc[-1]))
+                    # noise: separation tiny / candle body tiny / recent swing small
+                    swing = float(high.tail(6).max() - low.tail(6).min())
+                    noisy = (ma_dist < 0.6) or (body < 0.8) or (swing < args.noise_amp)
+                    if noisy:
+                        log(ts, "noise_skip", "K线噪声: ma_dist=%.2f body=%.2f swing=%.2f 跳过" % (
+                            ma_dist, body, swing))
                         sig = 0
 
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
-                ai = mt5.account_info()
-                equity = ai.equity if ai else 0
                 px = float(close.iloc[-1])
-                base_lot = leverage_lots(equity, px, args.target_leverage)
+                base_lot = args.lot_size  # fixed 0.3 per trade (multi-position allowed)
 
-                ts = datetime.now().strftime("%H:%M:%S")
                 log(ts, "tick", "close=%.2f 多%.2f/空%.2f lot=%.2f sig=%+d" % (
                     px, buy_lots, sell_lots, base_lot, sig))
 
-                # exit current side when opposite signal
+                # ---- multiple concurrent: on a fresh cross, open a new 0.3-lot; if an
+                #      opposite signal appears, close the opposite-direction positions ----
                 cur = 1 if buy_lots > 0 else (-1 if sell_lots > 0 else 0)
-                if sig != 0 and cur != 0 and sig != cur:
-                    log(ts, "flip", "信号%+d 反向 - 平仓" % sig)
-                    for x in pos:
-                        ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                        cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
-                        if not args.dry_run:
-                            send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_flip")
-                elif cur == 0 and sig != 0:
+                if sig != 0:
+                    if cur != 0 and sig != cur:
+                        log(ts, "flip", "反向信号%+d - 平掉%+d方向仓位" % (sig, cur))
+                        for x in pos:
+                            opp = (x.type == mt5.POSITION_TYPE_BUY and sig < 0) or \
+                                  (x.type == mt5.POSITION_TYPE_SELL and sig > 0)
+                            if opp:
+                                ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                                cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
+                                if not args.dry_run:
+                                    send_order(args.symbol, x.volume, ct, cpx, 202605, "m520_flip")
+                    # open a new 0.3-lot in signal direction (allows multiple concurrent)
                     otype = mt5.POSITION_TYPE_BUY if sig > 0 else mt5.POSITION_TYPE_SELL
                     px0 = mt5.symbol_info_tick(args.symbol).ask if sig > 0 else mt5.symbol_info_tick(args.symbol).bid
-                    log(ts, "open", "%s %.2f手 @%.2f (金叉/死叉%+d)" % (
+                    log(ts, "open", "%s %.2f手 @%.2f (信号%+d)" % (
                         "BUY" if sig > 0 else "SELL", base_lot, px0, sig))
                     if not args.dry_run:
                         send_order(args.symbol, base_lot, otype, px0, 202605, "m520_open")
