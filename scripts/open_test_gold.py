@@ -61,15 +61,43 @@ def main() -> None:
 
     if args.close_first:
         poses = mt5.positions_get(symbol=SYMBOL) or []
+        close_fill = mt5.ORDER_FILLING_IOC
         for p in poses:
             mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": SYMBOL,
                             "volume": p.volume, "type": mt5.ORDER_TYPE_BUY if p.type == mt5.POSITION_TYPE_SELL else mt5.ORDER_TYPE_SELL,
                             "position": p.ticket, "price": tick.bid, "deviation": 30, "magic": 0,
                             "comment": "close_test", "type_time": mt5.ORDER_TIME_GTC,
-                            "type_filling": si.filling_mode or mt5.ORDER_FILLING_IOC})
+                            "type_filling": close_fill})
         print("已平掉现有持仓")
 
     lots = args.lots
+    # resolve a usable filling mode: prefer IOC, then FOK, else the symbol's value
+    si_fill = si.filling_mode
+    for _fname, _fval in [("IOC", mt5.ORDER_FILLING_IOC), ("FOK", mt5.ORDER_FILLING_FOK)]:
+        fill_probe = mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": SYMBOL,
+                                     "volume": 0.01, "type": mt5.ORDER_TYPE_BUY,
+                                     "price": tick.ask, "deviation": 40, "magic": 0,
+                                     "comment": "fill_probe", "type_time": mt5.ORDER_TIME_GTC,
+                                     "type_filling": _fval})
+        if fill_probe.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
+            # close the probe so the basket is clean
+            probe_pos = mt5.positions_get(symbol=SYMBOL)
+            if probe_pos:
+                for pp in probe_pos:
+                    if pp.comment == "fill_probe":
+                        mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": SYMBOL,
+                                        "volume": pp.volume,
+                                        "type": mt5.ORDER_TYPE_SELL, "price": tick.bid,
+                                        "deviation": 40, "magic": 0, "position": pp.ticket,
+                                        "comment": "close_probe", "type_time": mt5.ORDER_TIME_GTC,
+                                        "type_filling": _fval})
+            FILL = _fval
+            print(f"使用填充模式: {_fname}")
+            break
+    else:
+        FILL = si_fill
+        print(f"使用填充模式: symbol值({si_fill})")
+
     # a small hedged set: 2 buys + 2 sells at different lots, mimicking grid layers
     orders = [
         (mt5.ORDER_TYPE_BUY, lots),
@@ -83,7 +111,7 @@ def main() -> None:
         req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": SYMBOL, "volume": vol,
                "type": typ, "price": price, "deviation": 40, "magic": 0,
                "comment": "grid_test", "type_time": mt5.ORDER_TIME_GTC,
-               "type_filling": si.filling_mode or mt5.ORDER_FILLING_IOC}
+               "type_filling": FILL}
         res = mt5.order_send(req)
         ok = res.retcode == mt5.TRADE_RETCODE_DONE
         print("  %s %.2f手 @%.2f -> %s %s" % (
