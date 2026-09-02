@@ -71,6 +71,8 @@ def main():
     p.add_argument("--ema-slow", type=int, default=30)
     p.add_argument("--stop-atr-mult", type=float, default=2.0,
                    help="hard stop = this * ATR (to avoid riding a loss; 0 disables)")
+    p.add_argument("--trend-confirm", type=int, default=2,
+                   help="consecutive bars of the same trend before reversing (filters EMA jitter)")
     p.add_argument("--equity-floor", type=float, default=0.30)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_tracker_log.csv"))
@@ -101,6 +103,7 @@ def main():
     print("趋势跟踪(看涨做多/看跌做空/反转反手/不加仓/带止损) 运行中")
     print("=" * 64)
     last_trend = 0
+    trend_run = 0   # consecutive bars with the same non-zero trend (confirmation guard)
     try:
         while True:
             try:
@@ -108,6 +111,13 @@ def main():
                 if rates is None or len(rates) < args.ema_slow:
                     time.sleep(args.cycle_sec); continue
                 trend = ema_trend(rates, args.ema_fast, args.ema_slow)
+                # trend-confirmation guard: count consecutive same non-zero trend bars, so a
+                # single EMA-jitter bar doesn't trigger a false reverse.
+                if trend != 0 and trend == last_trend:
+                    trend_run += 1
+                else:
+                    trend_run = 1 if trend != 0 else 0
+                confirmed = trend != 0 and trend_run >= args.trend_confirm
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 ai = mt5.account_info()
                 t = mt5.symbol_info_tick(args.symbol)
@@ -158,14 +168,14 @@ def main():
                       (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos) else 0)
 
                 # reversal: trend flipped vs current position -> close + reopen on trend side
-                if trend != 0 and cur != 0 and trend != cur:
+                if confirmed and cur != 0 and trend != cur:
                     log(ts, "REVERSE", "趋势%+d 与持仓%+d相反 - 反手" % (trend, cur))
                     for x in pos:
                         if not args.dry_run:
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     cur = 0
                 # open fresh in trend direction
-                if cur == 0 and trend != 0:
+                if confirmed and cur == 0:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f" % (
