@@ -32,7 +32,11 @@ D["date"] = pd.to_datetime(D["date"], utc=True)
 D = D.sort_values("date").reset_index(drop=True)
 
 # Production config v3: confidence-scaled + macro risk-dampening.
-cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3,
+# ATTENTION: conf_mult=15.0 is the AGGRESSIVE variant chosen for the 2024-26 bull
+# window (+101%). It is ONLY safe while gold is in a confirmed bull regime — on the
+# full 2019-2026 history (which includes the 2022/2023 losing years) it BLOWS UP
+# (-100%). Never deploy this outside a verified bull era.
+cfg = AdaptiveConfig(conf_mult=15.0, conf_power=1.0, conf_floor=0.3,
                      macro_lev_lo=0.5, macro_lev_hi=1.0)
 
 # warm indicators on full history, then restrict the trading window
@@ -96,4 +100,18 @@ print(m["ret"].round(1).to_string())
 out = Path(r"C:\Users\张策\Documents\EA量化项目\reports") / "bull_adaptive_circuit_breaker"
 pd.DataFrame({"date": res["dates"], "equity": res["equity"]}).to_csv(f"{out}_equity.csv", index=False, encoding="utf-8-sig")
 res["trades"].to_csv(f"{out}_trades.csv", index=False, encoding="utf-8-sig")
+
+# --- safety check: full 2019-2026 history (includes losing years) ---
+FULL = (D["date"] >= "2019-01-01") & (D["date"] <= "2026-08-28")
+full_win = frame[FULL].reset_index(drop=True).copy()
+res_full = run_leverage_backtest(full_win, cost, "full",
+                                 leverage_series=full_win["lev"].to_numpy(),
+                                 risk_series=full_win["risk"].to_numpy())
+sf = res_full["stats"]
+print("\n[安全校验] 完整区间 2019-2026 (含 2022/2023 亏损年):")
+print(f"  ret {sf['total_return']:+7.1f}%  PF {sf['profit_factor']:.2f}  "
+      f"maxDD {sf['max_drawdown']:.1f}%  tr {sf['trade_count']}")
+if sf["max_drawdown"] >= cfg.margin_call_pct * 100 - 0.5:
+    print("  ⚠️ 该配置在此区间爆仓 (触及22-25%熔断)。只适用于确认牛市前提。")
+
 print(f"\nsaved {out}_equity.csv / _trades.csv")

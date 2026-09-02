@@ -30,8 +30,10 @@ D = pd.read_csv(r"C:\Users\张策\Documents\EA量化项目\data\XAUUSD_1d.csv", 
 D["date"] = pd.to_datetime(D["date"], utc=True)
 D = D.sort_values("date").reset_index(drop=True)
 
-# Production config v3: confidence-scaled + macro risk-dampening.
-cfg = AdaptiveConfig(conf_mult=2.5, conf_power=1.0, conf_floor=0.3,
+# Production config v3 (AGGRESSIVE): confidence-scaled exposure conf x15 + macro
+# risk-dampening. NOTE: this blows up on the full history (non-bull years). Only use
+# while gold is in a confirmed bull regime. See docs/conf_x15_aggressive.md.
+cfg = AdaptiveConfig(conf_mult=15.0, conf_power=1.0, conf_floor=0.3,
                      macro_lev_lo=0.5, macro_lev_hi=1.0)
 
 # ---- warm indicators on the FULL history, slice the signal window ----
