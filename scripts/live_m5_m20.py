@@ -78,22 +78,41 @@ def main():
         print("  [%s] %s: %s" % (ts, ev, detail), flush=True)
 
     print("=" * 64)
-    print("M5/M20 金叉死叉双向 运行中...")
+    print("M5均线(5分钟周期) vs M20均线(20分钟周期) 金叉死叉双向 运行中...")
     print("=" * 64)
     last_sig = 0  # only act when the cross direction CHANGES (new cross), no repeat churn
     try:
         while True:
             try:
-                rates = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M5, 0, 200)
-                if rates is None or len(rates) < 30:
+                # ---- 真正的 M5均线 vs M20均线 (跨周期, 时间对齐到M5) ----
+                # M5 周期数据 (主轴)
+                r5 = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M5, 0, 300)
+                if r5 is None or len(r5) < 30:
                     time.sleep(args.cycle_sec); continue
-                d = pd.DataFrame(rates)
-                close = d["close"].astype(float)
-                high = d["high"].astype(float)
-                low = d["low"].astype(float)
-                f = close.ewm(span=args.fast, adjust=False).mean()
-                s = close.ewm(span=args.slow, adjust=False).mean()
-                spread_ma = (f - s).to_numpy()
+                d5 = pd.DataFrame(r5)
+                d5["t"] = pd.to_datetime(d5["time"], unit="s", utc=True)
+                d5["close"] = d5["close"].astype(float)
+                d5["high"] = d5["high"].astype(float)
+                d5["low"] = d5["low"].astype(float)
+                # M20 周期数据 -> M20均线
+                r20 = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M20, 0, 300)
+                if r20 is None or len(r20) < args.slow:
+                    time.sleep(args.cycle_sec); continue
+                d20 = pd.DataFrame(r20)
+                d20["t"] = pd.to_datetime(d20["time"], unit="s", utc=True)
+                d20["close"] = d20["close"].astype(float)
+                d20["ma20"] = d20["close"].ewm(span=args.slow, adjust=False).mean()
+                # M5 周期均线 (短)
+                ma5 = d5["close"].ewm(span=args.fast, adjust=False).mean()
+                # 对齐 M20均线 到 M5 时间轴
+                idx = np.searchsorted(d20["t"].values, d5["t"].values, side="right") - 1
+                idx = np.clip(idx, 0, len(d20) - 1)
+                ma20_on_m5 = d20["ma20"].values[idx]
+                spread_ma = (ma5.to_numpy() - ma20_on_m5)
+
+                close = d5["close"]
+                high = d5["high"]
+                low = d5["low"]
                 ts = datetime.now().strftime("%H:%M:%S")
                 sig = 0
                 if len(spread_ma) >= 2:
@@ -101,11 +120,10 @@ def main():
                         sig = 1
                     elif spread_ma[-1] < 0 and spread_ma[-2] >= 0:
                         sig = -1
-                # ---- K-line noise correction (强过滤, 依据统计: 平均间隔9点/中位5.3点/大量<1点噪声;
-                #      交叉瞬间分离度仅0.6点, 方向不明 -> 用摆动+实体+分离度过滤) ----
+                # ---- K-line noise correction (排除小震荡噪声) ----
                 if sig != 0:
-                    ma_dist = abs(float(f.iloc[-1]) - float(s.iloc[-1]))
-                    body = abs(float(close.iloc[-1]) - float(d["open"].iloc[-1]))
+                    ma_dist = abs(spread_ma[-1])
+                    body = abs(float(close.iloc[-1]) - float(d5["open"].iloc[-1]))
                     swing = float(high.tail(6).max() - low.tail(6).min())
                     noisy = (ma_dist < args.min_sep) or (body < args.min_body) or (swing < args.noise_amp)
                     if noisy:
