@@ -64,6 +64,13 @@ def main() -> None:
                         help="seconds to wait after a martingale add before avg-TP can fire")
     parser.add_argument("--trend-ema-fast", type=int, default=10)
     parser.add_argument("--trend-ema-slow", type=int, default=30)
+    parser.add_argument("--tp-atr-mult", type=float, default=None,
+                        help="take-profit: close when the trend-side unrealized profit "
+                             ">= tp_atr_mult * (tpatr_tf ATR), e.g. 2.0 = lock in after a "
+                             "2x (that TF) ATR move")
+    parser.add_argument("--tp-atr-tf", default=None,
+                        help="timeframe for the TP ATR basis (M1/M5/M15/M30/H1/H4); "
+                             "default: use the M1 grid step scaled by tp-atr-mult")
     parser.add_argument("--base-lot", type=float, default=0.1)
     parser.add_argument("--target-leverage", type=float, default=None,
                         help="if set, base lot = leverage * account_equity / (price * 100 oz); "
@@ -124,6 +131,16 @@ def main() -> None:
                 a = atr(o["high"], o["low"], o["close"], args.atr_bars)
                 a_now = float(a.iloc[-1]) if not np.isnan(a.iloc[-1]) else 1.0
                 step = a_now * args.grid_atr
+                # TP ATR basis: if --tp-atr-tf given, use that TF's ATR (e.g. M15), else M1 step
+                _TF_MAP = {"M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+                           "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4}
+                if args.tp_atr_tf and args.tp_atr_tf.upper() in _TF_MAP:
+                    r_tf = mt5.copy_rates_from_pos(args.symbol, _TF_MAP[args.tp_atr_tf.upper()], 0, 40)
+                    o_tf = ohlc(r_tf) if r_tf is not None else o
+                    a_tf = atr(o_tf["high"], o_tf["low"], o_tf["close"], args.atr_bars)
+                    tp_atr = float(a_tf.iloc[-1]) if not np.isnan(a_tf.iloc[-1]) else a_now
+                else:
+                    tp_atr = step
                 last_close = float(o["close"].iloc[-1])
                 # EMA-based trend (smoother than a 14-bar slope, avoids flip-flopping
                 # in a one-way move). Up if close > ema_fast and ema_fast > ema_slow.
@@ -177,11 +194,27 @@ def main() -> None:
                     main_avg = buy_avg if main_side > 0 else sell_avg
                     main_last = mt5.symbol_info_tick(args.symbol).bid if main_side > 0 else mt5.symbol_info_tick(args.symbol).ask
                     moved = (main_avg - main_last) if main_side > 0 else (main_last - main_avg)
+                    # trend-side unrealized PROFIT distance (positive when in profit)
+                    profit_dist = (main_last - main_avg) if main_side > 0 else (main_avg - main_last)
                     layers = len(pos)
                     now = time.time()
 
+                    # 0) TAKE-PROFIT: lock in after a tp_atr_mult * (tp ATR) favorable move
+                    if args.tp_atr_mult and profit_dist >= tp_atr * args.tp_atr_mult:
+                        log(ts, "take_profit", f"浮盈 {profit_dist:.2f} ≥ {args.tp_atr_mult}xATR({tp_atr*args.tp_atr_mult:.2f}) - 止盈离场")
+                        if not args.dry_run:
+                            for p in pos:
+                                if (p.type == mt5.POSITION_TYPE_BUY and main_side > 0) or \
+                                   (p.type == mt5.POSITION_TYPE_SELL and main_side < 0):
+                                    mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
+                                                    "volume": p.volume,
+                                                    "type": mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+                                                    "price": mt5.symbol_info_tick(args.symbol).bid if p.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask,
+                                                    "deviation": 40, "magic": 202602, "position": p.ticket,
+                                                    "comment": "take_profit", "type_time": mt5.ORDER_TIME_GTC,
+                                                    "type_filling": mt5.ORDER_FILLING_IOC})
                     # 1) TREND-CONSISTENCY: if the open side now OPPOSES the trend, close it
-                    if trend != 0 and main_side != trend:
+                    elif trend != 0 and main_side != trend:
                         log(ts, "trend_flip", f"趋势{trend:+d}与持仓{'多' if main_side>0 else '空'}相反 - 平该侧仓位")
                         if not args.dry_run:
                             for p in pos:
