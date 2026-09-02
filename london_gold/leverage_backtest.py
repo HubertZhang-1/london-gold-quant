@@ -21,12 +21,14 @@ from london_gold.backtest import CostConfig, _fill_price
 
 
 def run_leverage_backtest(df: pd.DataFrame, cost: CostConfig, name: str = "",
-                          leverage_series: np.ndarray | None = None) -> dict:
+                          leverage_series: np.ndarray | None = None,
+                          risk_series: np.ndarray | None = None) -> dict:
     """Backtest a signal/stop/tp frame with margin-account leverage.
 
     If ``leverage_series`` is supplied (per-bar leverage array), each opening
     uses the leverage of the PREVIOUS bar (bar i-1); otherwise a fixed
-    ``cost.leverage`` is used.
+    ``cost.leverage`` is used. ``risk_series`` (optional) sets the per-bar
+    risk fraction (per-trade % of capital) the same way, else ``cost.risk_per_trade_pct``.
     """
     data = df.reset_index(drop=True)
     if "signal" not in data:
@@ -109,8 +111,12 @@ def run_leverage_backtest(df: pd.DataFrame, cost: CostConfig, name: str = "",
                     lev = float(leverage_series[i - 1])
                 if lev > 0 and entry_mid > 0:
                     oz = cost.capital * lev / entry_mid
-                if cost.risk_per_trade_pct > 0 and stop_dist > 0:
-                    risk_oz = cost.capital * cost.risk_per_trade_pct / stop_dist
+                # per-bar risk fraction, else fixed
+                risk_pct = cost.risk_per_trade_pct
+                if risk_series is not None and i - 1 < len(risk_series):
+                    risk_pct = float(risk_series[i - 1])
+                if risk_pct > 0 and stop_dist > 0:
+                    risk_oz = cost.capital * risk_pct / stop_dist
                     oz = min(oz, risk_oz)
                 if cost.max_oz > 0:
                     oz = min(oz, cost.max_oz)

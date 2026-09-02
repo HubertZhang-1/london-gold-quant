@@ -37,6 +37,12 @@ from .gold_system import (
     SystemConfig,
     build_three_line_frame,
 )
+from .bull_adaptive import (
+    AdaptiveConfig,
+    build_signals,
+    prepare_daily,
+    run_adaptive,
+)
 
 __all__ = [
     "fetch_daily",
@@ -61,6 +67,10 @@ __all__ = [
     "SystemConfig",
     "build_three_line_frame",
     "MICRO_WEIGHTS",
+    "AdaptiveConfig",
+    "run_adaptive",
+    "prepare_daily",
+    "build_signals",
     "CostConfig",
     "run_backtest",
     "donchian_breakout_signals",
