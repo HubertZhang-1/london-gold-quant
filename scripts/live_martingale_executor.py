@@ -44,6 +44,13 @@ def ohlc(rates: np.ndarray) -> dict:
     }
 
 
+def leverage_base_lot(equity: float, price: float, leverage: float, oz_per_lot: float = 100.0) -> float:
+    """Lots so that notional (lots*price*oz_per_lot) = leverage * equity."""
+    if price <= 0 or oz_per_lot <= 0:
+        return 0.01
+    return max(0.01, round(leverage * equity / (price * oz_per_lot), 2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live martingale-grid auto-trading executor")
     parser.add_argument("--symbol", default=SYMBOL)
@@ -56,6 +63,11 @@ def main() -> None:
     parser.add_argument("--tp-cooldown", type=float, default=120.0,
                         help="seconds to wait after a martingale add before avg-TP can fire")
     parser.add_argument("--base-lot", type=float, default=0.1)
+    parser.add_argument("--target-leverage", type=float, default=None,
+                        help="if set, base lot = leverage * account_equity / (price * 100 oz); "
+                             "overrides --base-lot (e.g. 5.0 = 5x notional)")
+    parser.add_argument("--max-unreal-loss-pct", type=float, default=None,
+                        help="hard stop: if unrealized loss >= this % of equity, close the basket")
     parser.add_argument("--dry-run", action="store_true", help="print decisions, do NOT place orders")
     parser.add_argument("--only-demo", action="store_true", default=True, help="only trade if demo account")
     parser.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_martingale_executor_log.csv"))
@@ -120,20 +132,30 @@ def main() -> None:
                 buy_avg = np.mean([p.price_open for p in pos if p.type == mt5.POSITION_TYPE_BUY]) if buy_lots else 0
                 sell_avg = np.mean([p.price_open for p in pos if p.type == mt5.POSITION_TYPE_SELL]) if sell_lots else 0
 
+                # resolve base lot: leverage-based (5x notional) or explicit --base-lot
+                ai = mt5.account_info()
+                live_equity = ai.equity if ai else last_close
+                tick0 = mt5.symbol_info_tick(args.symbol)
+                price0 = (tick0.ask + tick0.bid) / 2.0 if tick0 else last_close
+                if args.target_leverage:
+                    base_lot = leverage_base_lot(live_equity, price0, args.target_leverage)
+                else:
+                    base_lot = args.base_lot
+
                 ts = datetime.now().strftime("%H:%M:%S")
                 # --- decision summary ---
                 detail = (f"close={last_close:.2f} trend={trend:+d} ATR={a_now:.2f} step={step:.2f} "
-                          f"持仓 多{buy_lots:.2f}/空{sell_lots:.2f}")
+                          f"持仓 多{buy_lots:.2f}/空{sell_lots:.2f} base_lot={base_lot:.2f}")
                 log(ts, "tick", detail)
 
                 # open main basket if flat and clear trend
                 if not pos and trend != 0:
                     t = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     px = mt5.symbol_info_tick(args.symbol).ask if trend > 0 else mt5.symbol_info_tick(args.symbol).bid
-                    log(ts, "open_main", f"{'BUY' if trend>0 else 'SELL'} {args.base_lot}手 @{px:.2f}")
+                    log(ts, "open_main", f"{'BUY' if trend>0 else 'SELL'} {base_lot}手 @{px:.2f}")
                     if not args.dry_run:
                         mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
-                                        "volume": args.base_lot, "type": t, "price": px,
+                                        "volume": base_lot, "type": t, "price": px,
                                         "deviation": 40, "magic": 202602, "comment": "grid_main",
                                         "type_time": mt5.ORDER_TIME_GTC,
                                         "type_filling": mt5.ORDER_FILLING_IOC})
@@ -162,16 +184,31 @@ def main() -> None:
                                                     "deviation": 40, "magic": 202602, "position": p.ticket,
                                                     "comment": "trend_flip", "type_time": mt5.ORDER_TIME_GTC,
                                                     "type_filling": mt5.ORDER_FILLING_IOC})
+                    # 1b) HARD RISK STOP: if unrealized loss >= threshold of equity, close basket
+                    elif args.max_unreal_loss_pct and buy_lots + sell_lots > 0:
+                        ui = mt5.account_info()
+                        unreal_frac = (ui.equity - ui.balance) / ui.balance if ui and ui.balance > 0 else 0.0
+                        if unreal_frac <= -args.max_unreal_loss_pct:
+                            log(ts, "risk_stop", f"浮亏 {unreal_frac*100:.2f}% ≥ {args.max_unreal_loss_pct*100:.2f}% - 强平全仓")
+                            if not args.dry_run:
+                                for p in pos:
+                                    mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
+                                                    "volume": p.volume,
+                                                    "type": mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+                                                    "price": mt5.symbol_info_tick(args.symbol).bid if p.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask,
+                                                    "deviation": 40, "magic": 202602, "position": p.ticket,
+                                                    "comment": "risk_stop", "type_time": mt5.ORDER_TIME_GTC,
+                                                    "type_filling": mt5.ORDER_FILLING_IOC})
                     # 2) ADD only WITH the trend (never against it)
                     elif trend != 0 and main_side == trend and \
                             now - last_add_time >= args.tp_cooldown and \
                             layers < args.max_layers and moved >= step:
                         tadd = mt5.POSITION_TYPE_BUY if main_side > 0 else mt5.POSITION_TYPE_SELL
                         px = mt5.symbol_info_tick(args.symbol).ask if main_side > 0 else mt5.symbol_info_tick(args.symbol).bid
-                        log(ts, "martingale_add", f"顺势 层{layers+1} {args.base_lot}手 @{px:.2f} (反向{moved:.2f})")
+                        log(ts, "martingale_add", f"顺势 层{layers+1} {base_lot}手 @{px:.2f} (反向{moved:.2f})")
                         if not args.dry_run:
                             mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": args.symbol,
-                                            "volume": args.base_lot, "type": tadd, "price": px,
+                                            "volume": base_lot, "type": tadd, "price": px,
                                             "deviation": 40, "magic": 202602, "comment": "grid_add",
                                             "type_time": mt5.ORDER_TIME_GTC,
                                             "type_filling": mt5.ORDER_FILLING_IOC})
