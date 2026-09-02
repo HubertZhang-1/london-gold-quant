@@ -32,8 +32,7 @@ from london_gold.martingale_grid import MartingaleConfig, run_martingale_backtes
 
 # alert thresholds (configurable)
 ALERT_MAIN_LOTS = 3.0    # warn when the martingale main stack exceeds this many lots
-ALERT_DRAWDOWN = 0.20    # warn near-drawdown (as fraction) before the 30% breaker
-ALERT_DAILY_LOSS = 0.02  # warn near the 3% daily-loss breaker
+ALERT_DRAWDOWN = 0.15    # warn near-drawdown (as fraction) before the max-dd breaker
 
 
 def main() -> None:
@@ -45,7 +44,13 @@ def main() -> None:
     df = pd.read_csv(args.csv)
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = df.sort_values("date").reset_index(drop=True)
-    cfg = MartingaleConfig(initial_balance_usc=args.balance, stop_loss_atr=0.0, use_trend_filter=True)
+    # Safe LIVE config (see docs/reproduce_live_safe_config.md): tight daily-loss + max-dd
+    # breakers so a one-way adverse month stops out (-2.8%) instead of blowing up.
+    cfg = MartingaleConfig(initial_balance_usc=args.balance, stop_loss_atr=0.0,
+                           use_trend_filter=True,
+                           max_layers=4,            # martingale layers
+                           daily_loss_pct=0.02,     # ★ daily-loss breaker (2%)
+                           max_drawdown_pct=0.20)   # ★ max-drawdown breaker (20%)
 
     res = run_martingale_backtest(df, cfg)
     s = res.stats
@@ -88,6 +93,41 @@ def main() -> None:
         print("  当前空仓")
     print(f"  权益/余额  : ${equity_now:,.0f} / ${balance:,.0f}")
 
+    # ---- real-time safety check (live config) ----
+    print("\n[实盘安全校验]")
+    # distance to max-drawdown breaker
+    peak_eq = max(eq["equity"].max(), equity_now) if len(eq) else equity_now
+    dd_now = (peak_eq - equity_now) / peak_eq if peak_eq > 0 else 0.0
+    dd_line = cfg.max_drawdown_pct
+    print(f"  回撤熔断   : 当前 {dd_now*100:.2f}% / 线 {dd_line*100:.0f}%  "
+          f"(余量 {(dd_line - dd_now)*100:.2f}%)")
+    if dd_now >= dd_line * 0.7:
+        print(f"  ⚠️ 警告: 回撤已达 {dd_now*100:.1f}%，接近 {dd_line*100:.0f}% 熔断线(剩余不足{(dd_line-dd_now)*100:.1f}%)，建议减仓/停机")
+
+    # distance to daily-loss breaker (only meaningful if there were losing days)
+    if len(tr):
+        trc = tr.copy()
+        trc["date"] = pd.to_datetime(trc["time"], utc=True).dt.date
+        daily = trc.groupby("date")["pnl_usc"].sum()
+        worst_neg = float(daily.min())
+        nday = len(daily)
+        losing_days = int((daily < 0).sum())
+        dl_line = cfg.daily_loss_pct
+        if losing_days > 0:
+            worst_pct = -worst_neg / args.balance  # positive fraction
+            print(f"  日亏熔断   : 最差单日亏 ${worst_neg:,.0f} ({worst_pct*100:.2f}%) / 线 {dl_line*100:.0f}%")
+            if worst_pct >= dl_line * 0.7:
+                print(f"  ⚠️ 警告: 曾单日亏损 {worst_pct*100:.1f}%，接近 {dl_line*100:.0f}% 日亏熔断线")
+        else:
+            print(f"  日亏熔断   : 本段无亏损日(最差日 +${worst_neg:,.0f}) → 未触发, 线 {dl_line*100:.0f}%")
+
+    # how close the martingale stack came to the layer cap
+    open_ev = ev[ev["event"] == "open"]
+    if len(open_ev):
+        peak_layer = float(open_ev["layer"].max())
+        print(f"  马丁层数   : 峰值 {peak_layer:.0f} / 上限 {cfg.max_layers}  "
+              f"({'接近上限' if peak_layer >= cfg.max_layers - 1 else '安全'})")
+
     # ---- full risk profile ----
     print("\n[全程风险画像]")
     open_ev = ev[ev["event"] == "open"]
@@ -113,15 +153,16 @@ def main() -> None:
 
     # daily P&L distribution
     if len(tr):
-        tr = tr.copy()
-        tr["date"] = pd.to_datetime(tr["time"], utc=True).dt.date
-        daily = tr.groupby("date")["pnl_usc"].sum()
+        trd = tr.copy()
+        trd["date"] = pd.to_datetime(trd["time"], utc=True).dt.date
+        daily = trd.groupby("date")["pnl_usc"].sum()
         worst = float(daily.min())
         nday = len(daily)
         losing_days = int((daily < 0).sum())
-        print(f"  当日盈亏分布: 最大单日亏 ${worst:,.0f}  亏钱天数 {losing_days}/{nday}")
-        if worst <= -args.balance * ALERT_DAILY_LOSS:
-            print(f"  ⚠️ 警告: 曾有单日亏损 ${worst:,.0f} ≥ {ALERT_DAILY_LOSS*100:.0f}% 本金, 接近日亏熔断")
+        if losing_days > 0:
+            print(f"  当日盈亏分布: 最大单日亏 ${worst:,.0f}  亏钱天数 {losing_days}/{nday}")
+        else:
+            print(f"  当日盈亏分布: 无亏损日(最差日 +${worst:,.0f})  亏钱天数 0/{nday}")
 
     # exit reason breakdown
     if len(tr):
