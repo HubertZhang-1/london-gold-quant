@@ -82,6 +82,12 @@ def main() -> None:
     p.add_argument("--target-leverage", type=float, default=5.0)
     p.add_argument("--tp-atr-mult", type=float, default=3.0)
     p.add_argument("--tp-atr-tf", default="M15")
+    p.add_argument("--trail-activate-atr", type=float, default=1.0,
+                   help="trailing stop activates once the trend-side profit reaches "
+                        "this many (TP-TF) ATR")
+    p.add_argument("--trail-back-atr", type=float, default=0.5,
+                   help="after activation, close when profit retraces this many "
+                        "(M1) ATR below its peak -> locks in gains, avoids give-back")
     p.add_argument("--max-unreal-loss-pct", type=float, default=0.05)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_follow_log.csv"))
@@ -112,6 +118,8 @@ def main() -> None:
           f"杠杆{args.target_leverage}x  TP={args.tp_atr_mult}x{args.tp_atr_tf}-ATR  "
           f"风险止损{args.max_unreal_loss_pct*100:.0f}%")
     print("=" * 66)
+
+    trail_peak = None  # peak trend-side profit (in price points) for the trailing stop
 
     try:
         while True:
@@ -184,6 +192,30 @@ def main() -> None:
                             tp_atr = float(a_t.iloc[-1]) if not np.isnan(a_t.iloc[-1]) else 5.0
                         else:
                             tp_atr = 5.0
+                        # M1 ATR for the trail-back distance
+                        m1 = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M1, 0, 20)
+                        o1 = ohlc(m1) if m1 is not None else o
+                        a1 = atr(pd.Series(o1["high"]), pd.Series(o1["low"]), pd.Series(o1["close"]), 14)
+                        m1_atr = float(a1.iloc[-1]) if not np.isnan(a1.iloc[-1]) else 2.0
+
+                        # ---- TRAILING STOP: activate after trail-activate-atr * tp_atr,
+                        #     then close if profit retraces trail-back-atr * m1_atr from peak ----
+                        if args.trail_activate_atr and profit_dist >= tp_atr * args.trail_activate_atr:
+                            if trail_peak is None or profit_dist > trail_peak:
+                                trail_peak = profit_dist
+                            trail_back = m1_atr * args.trail_back_atr
+                            if profit_dist <= trail_peak - trail_back:
+                                log(ts, "trail_stop", f"峰值{trail_peak:.2f}回撤至{profit_dist:.2f}(回吐{trail_peak-profit_dist:.2f}≥{trail_back:.2f}) - 落袋")
+                                for x in pos:
+                                    if (x.type == mt5.POSITION_TYPE_BUY and tside > 0) or \
+                                       (x.type == mt5.POSITION_TYPE_SELL and tside < 0):
+                                        ct = mt5.ORDER_TYPE_SELL if x.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                                        cpx = mt5.symbol_info_tick(args.symbol).bid if x.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(args.symbol).ask
+                                        if not args.dry_run:
+                                            send_order(args.symbol, x.volume, ct, cpx, 202603, "tf_trail", mt5.ORDER_FILLING_IOC)
+                                        trail_peak = None
+                        else:
+                            trail_peak = None
                         # take-profit
                         if profit_dist >= tp_atr * args.tp_atr_mult:
                             log(ts, "take_profit", f"浮盈{profit_dist:.2f} ≥ {args.tp_atr_mult}x{tv}ATR({tp_atr*args.tp_atr_mult:.2f}) - 平顺势仓")
