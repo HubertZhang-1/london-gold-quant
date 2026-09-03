@@ -22,6 +22,7 @@ import MetaTrader5 as mt5
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+from london_gold.indicators import adx  # noqa: E402
 
 SYMBOL = "XAUUSD"
 USC = 100.0
@@ -156,19 +157,10 @@ def main():
                 volatility_ok = True
                 if args.adx_gate and args.adx_gate > 0:
                     try:
-                        h = df["high"].astype(float).to_numpy()
-                        l = df["low"].astype(float).to_numpy()
-                        c = df["close"].astype(float).to_numpy()
-                        up = np.diff(h, prepend=h[0])
-                        dn = -np.diff(l, prepend=l[0])
-                        tr_ = np.maximum(h - l, np.maximum(np.abs(h - np.roll(c, 1)), np.abs(l - np.roll(c, 1))))
-                        atr_ = ewm(tr_, 14)
-                        plus = ewm(np.where((up > dn) & (up > 0), up, 0.0), 14)
-                        minus = ewm(np.where((dn > up) & (dn > 0), dn, 0.0), 14)
-                        pdi = 100 * plus / atr_.clip(min=1e-9)
-                        mdi = 100 * minus / atr_.clip(min=1e-9)
-                        dx = 100 * np.abs(pdi - mdi) / np.clip(pdi + mdi, 1e-9, None)
-                        adx_val = float(pd.Series(dx).rolling(14).mean().iloc[-1])
+                        # use the verified library ADX (standard calculation)
+                        adx_series = adx(df["high"].astype(float), df["low"].astype(float),
+                                         df["close"].astype(float), 14)
+                        adx_val = float(adx_series.iloc[-1]) if not pd.isna(adx_series.iloc[-1]) else 0.0
                         volatility_ok = adx_val >= args.adx_gate
                     except Exception:
                         volatility_ok = True
