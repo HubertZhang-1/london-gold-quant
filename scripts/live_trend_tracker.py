@@ -97,6 +97,11 @@ def main():
                    help="require the last M5 tick_volume >= mean * this before trusting the "
                         "EMA trend (0.8 filters only significant volume-collapse/fake signals; "
                         "1.2 would be too strict as only ~25% of bars clear it; 0 disables)")
+    p.add_argument("--tp-activate-profit", type=float, default=50.0,
+                   help="trailing take-profit activates once unrealized profit >= this (USD)")
+    p.add_argument("--tp-trail-pct", type=float, default=0.10,
+                   help="after activation, close when profit retraces >= this fraction from "
+                        "its peak (e.g. 0.10 = lock in after a 10% pullback / keep 90%)")
     p.add_argument("--equity-floor", type=float, default=0.30)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_tracker_log.csv"))
@@ -128,6 +133,7 @@ def main():
     print("=" * 64)
     last_trend = 0
     trend_run = 0   # consecutive bars with the same non-zero trend (confirmation guard)
+    peak_profit = 0.0  # trailing take-profit peak (USD)
     try:
         while True:
             try:
@@ -208,6 +214,26 @@ def main():
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos) else \
                       (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos) else 0)
+
+                # ---- trailing take-profit: activate once profit >= tp_activate; close when it
+                #      retraces >= tp_trail_pct from the peak (lock in gains) ----
+                if cur != 0 and pos:
+                    px_avg = float(np.mean([x.price_open for x in pos]))
+                    last_fx = bid if cur > 0 else ask
+                    # unrealized profit in USD (price moved * lots * 100, minus spread)
+                    gross = (last_fx - px_avg) * sum(x.volume for x in pos) * USC
+                    profit = gross - 0.37 * sum(x.volume for x in pos) * USC
+                    if profit >= args.tp_activate_profit:
+                        peak_profit = max(peak_profit, profit)
+                        if peak_profit > 0 and profit <= peak_profit * (1 - args.tp_trail_pct):
+                            log(ts, "TRAIL_TP", "浮盈$%.0f 从峰值$%.0f回落%.0f%% - 锁利平仓" % (
+                                profit, peak_profit, (1 - profit / peak_profit) * 100))
+                            for x in pos:
+                                if not args.dry_run:
+                                    close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                            peak_profit = 0.0
+                    else:
+                        peak_profit = 0.0  # reset if profit falls back below activation
 
                 # reversal: trend flipped vs current position -> close + reopen on trend side
                 if confirmed and cur != 0 and trend != cur:
