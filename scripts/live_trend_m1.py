@@ -178,10 +178,11 @@ def main():
                 #   $30<=peak<=$50    -> 回落到 $30 锁利
                 #   peak > $50        -> 回落到 peak*0.70 锁利 (回撤30%)
                 if cur != 0 and pos:
-                    px_avg = float(np.mean([x.price_open for x in pos]))
-                    last_fx = bid if cur > 0 else ask
-                    gross = (last_fx - px_avg) * sum(x.volume for x in pos) * USC
-                    profit = gross - 0.37 * sum(x.volume for x in pos) * USC
+                    # Use MT5's reported floating P&L. For XAUUSD this is pure price
+                    # move against price_open, which already bakes in the spread (a BUY
+                    # fills at the ask, is valued at the bid). Subtracting 0.37*oz here
+                    # would double-count the spread and shift every graded-TP threshold.
+                    profit = sum(x.profit for x in pos)
                     if profit > 0:
                         peak_profit = max(peak_profit, profit)
                         P = peak_profit
