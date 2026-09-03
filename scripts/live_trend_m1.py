@@ -53,10 +53,13 @@ def main():
                    help="override EMA5 smoothing alpha (default 2/(primary+1); lower=slower")
     p.add_argument("--ema-fast", type=int, default=10)
     p.add_argument("--ema-slow", type=int, default=30)
-    p.add_argument("--stop-usd", type=float, default=20.0,
-                   help="fixed max loss per position in USD (单笔≤$20). A 2xATR stop grows with "
-                        "volatility (hit ~$139 in a violent move), which lets large losses happen; "
-                        "a fixed cap guarantees the worst case. Converted to points via lot size.")
+    p.add_argument("--stop-usd", type=float, default=0.0,
+                   help="optional fixed max loss per position in USD (单笔≤$X). 0 = disabled "
+                        "(use the ATR stop below instead).")
+    p.add_argument("--stop-atr-mult", type=float, default=2.0,
+                   help="adaptive stop: multiplier x ATR. Used when --stop-usd is 0. The stop "
+                        "widens/narrows with volatility (2xATR is the confirmed rule). This is the "
+                        "primary stop, attached as a server-side SL at open.")
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
@@ -172,8 +175,9 @@ def main():
                                 np.maximum((df["high"] - df["close"].shift()).abs().astype(float),
                                            (df["low"] - df["close"].shift()).abs().astype(float)))
                 atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(df) >= 14 else 1.0
-                # ATR stop (fallback only when --stop-usd is 0; primary cap is the fixed $).
-                stop_pts = 2.0 * atr_now
+                # ATR stop: primary stop is stop_atr_mult x ATR (confirmed rule). A fixed --stop-usd
+                # overrides only if explicitly set > 0.
+                stop_pts = args.stop_atr_mult * atr_now
 
                 # --- crash/breakdown guards (慢涨防暴跌) ---
                 # 1) intraday cliff: last 1-min close change (completed + forming bar)
@@ -246,13 +250,11 @@ def main():
                         crash_block_dir = cur  # trend broke against cur: block the same side we
                                                # just exited, allow the with-trend opposite side
                         time.sleep(args.cycle_sec); continue
-                    # --- 固定金额止损 (单笔≤$50, 杜绝大亏损). A 2xATR stop is computed as
-                    #     stop_pts but grows with volatility (hit ~$139 in a violent move it
-                    #     could NOT catch), so it is superseded by a fixed dollar cap. ---
+                    # --- 止损: 2xATR 自适应 (确认规则; 随波动变宽/变窄). 可选固定 --stop-usd 覆盖. ---
                     oz = sum(x.volume for x in pos) * USC
                     stop_dollar = args.stop_usd if args.stop_usd > 0 else (stop_pts * oz)
                     if stop_dollar > 0 and profit <= -stop_dollar:
-                        log(ts, "STOP", "浮亏$%.0f 触及固定止损($%.0f, %.2f点/%.1f手) - 平仓" % (
+                        log(ts, "STOP", "浮亏$%.0f 触及止损($%.0f, %.2f点/%.1f手) - 平仓" % (
                             abs(profit), stop_dollar, stop_dollar / oz, sum(x.volume for x in pos)))
                         for x in pos:
                             if not args.dry_run:
@@ -310,9 +312,10 @@ def main():
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     # 真实SL挂单: MT5终端在价格触及止损价瞬间成交, 零滑点.
-                    # 止损点数 = stop_usd / oz. BUY止损在下方, SELL止损在上方.
+                    # 止损点数: 固定 --stop-usd 优先, 否则用 2xATR(自适应) stop_pts.
+                    # BUY止损在下方, SELL止损在上方.
                     oz = args.lot_size * USC
-                    stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else 0.0
+                    stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else (args.stop_atr_mult * atr_now)
                     sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
                     log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f SL=%.2f (波动可交易)" % (
                         trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
