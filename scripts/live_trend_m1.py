@@ -37,10 +37,10 @@ def close_by_ticket(symbol, ticket, volume, pos_type):
                            "type_filling": mt5.ORDER_FILLING_IOC})
 
 
-def open_order(symbol, volume, order_type, price, magic=202608, comment="open"):
+def open_order(symbol, volume, order_type, price, sl=None, magic=202608, comment="open"):
     return mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": volume,
                            "type": order_type, "price": price, "deviation": 40, "magic": magic,
-                           "comment": comment, "type_time": mt5.ORDER_TIME_GTC,
+                           "sl": sl, "comment": comment, "type_time": mt5.ORDER_TIME_GTC,
                            "type_filling": mt5.ORDER_FILLING_IOC})
 
 
@@ -345,11 +345,16 @@ def main():
                 if confirmed and cur == 0 and volatility_ok and direction_ok and not blocked_by_cooldown:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
-                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f (波动可交易)" % (
+                    # 真实SL挂单: MT5终端在价格触及止损价瞬间成交, 零滑点.
+                    # 止损点数 = stop_usd / oz. BUY止损在下方, SELL止损在上方.
+                    oz = args.lot_size * USC
+                    stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else 0.0
+                    sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
+                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f SL=%.2f (波动可交易)" % (
                         trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
-                        args.lot_size, price))
+                        args.lot_size, price, sl))
                     if not args.dry_run:
-                        open_order(args.symbol, args.lot_size, otype, price, 202608, "open")
+                        open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
                 elif confirmed and cur == 0 and blocked_by_cooldown:
                     log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
                         crash_block_until - time.time(),
