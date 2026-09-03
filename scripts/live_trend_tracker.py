@@ -47,19 +47,36 @@ def open_order(symbol, volume, order_type, price, magic=202607, comment="open"):
                            "type_filling": mt5.ORDER_FILLING_IOC})
 
 
-def ema_trend(rates, fast, slow):
+def ema_trend(rates, fast, slow, primary=5):
+    """Weighted trend: EMA(primary=5) is the PRIMARY driver; EMA(fast)/EMA(slow) act as a
+    LOW-WEIGHT background filter (big-picture). We return a hint in {+1,-1,0}.
+    - score = 2*sign(close vs EMA5)  (primary, high weight)
+    -        + 1*sign(close vs EMA_fast and EMA_fast vs EMA_slow)  (background, low weight)
+    Direction = sign(score); only a strong opposite BIG picture (fast vs slow both opposing
+    and EMA_primary agreeing with them) is allowed to veto."""
+    import numpy as _np
     df = pd.DataFrame(rates)
     cl = df["close"].astype(float).to_numpy()
+
     def ewm(a, span):
-        al = 2 / (span + 1); out = np.empty(len(a)); out[0] = a[0]
+        al = 2 / (span + 1); out = _np.empty(len(a)); out[0] = a[0]
         for k in range(1, len(a)): out[k] = al * a[k] + (1 - al) * out[k - 1]
         return out
-    ef = ewm(cl, fast); es = ewm(cl, slow)
+
+    ema5 = ewm(cl, primary)
+    ef = ewm(cl, fast)
+    es = ewm(cl, slow)
+    # primary: price vs EMA5 (high weight)
+    s_primary = 1 if cl[-1] > ema5[-1] else (-1 if cl[-1] < ema5[-1] else 0)
+    # background (low weight): EMA_fast vs EMA_slow and close vs both
+    s_bg = 0
     if cl[-1] > ef[-1] > es[-1]:
-        return 1
-    if cl[-1] < ef[-1] < es[-1]:
-        return -1
-    return 0
+        s_bg = 1
+    elif cl[-1] < ef[-1] < es[-1]:
+        s_bg = -1
+    # weighted: primary * 2 + background * 1 -> sign decides
+    score = 2 * s_primary + 1 * s_bg
+    return (1 if score > 0 else (-1 if score < 0 else 0))
 
 
 def main():
@@ -69,6 +86,9 @@ def main():
     p.add_argument("--lot-size", type=float, default=0.3)
     p.add_argument("--ema-fast", type=int, default=10)
     p.add_argument("--ema-slow", type=int, default=30)
+    p.add_argument("--ema-primary", type=int, default=5,
+                   help="primary EMA for the trend signal (high weight); EMA-fast/slow are a "
+                        "low-weight big-picture background filter")
     p.add_argument("--stop-atr-mult", type=float, default=2.0,
                    help="hard stop = this * ATR (to avoid riding a loss; 0 disables)")
     p.add_argument("--trend-confirm", type=int, default=2,
@@ -114,7 +134,7 @@ def main():
                 rates = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M5, 0, 60)
                 if rates is None or len(rates) < args.ema_slow:
                     time.sleep(args.cycle_sec); continue
-                trend = ema_trend(rates, args.ema_fast, args.ema_slow)
+                trend = ema_trend(rates, args.ema_fast, args.ema_slow, args.ema_primary)
                 # volume-confirmation factor: only trust an EMA signal when the last M5 bar
                 # traded on real turnover (tick_volume >= mean * volume_mult). A low-volume
                 # EMA flip is likely a虚假/fake signal -> ignore it (wait for volume).
@@ -130,12 +150,16 @@ def main():
                     except Exception:
                         volume_ok = True
                 # trend-confirmation guard: count consecutive same non-zero trend bars, so a
-                # single EMA-jitter bar doesn't trigger a false reverse.
+                # single EMA-jitter bar doesn't trigger a false reverse. A NEUTRAL (+0) bar
+                # pauses the count instead of resetting it — so an uptrend with a brief +0
+                # still confirms, but a genuine reversal (+1->-1) resets it.
                 if trend != 0 and trend == last_trend:
                     trend_run += 1
-                else:
-                    trend_run = 1 if trend != 0 else 0
+                elif trend != 0:
+                    trend_run = 1
+                # trend == 0 (neutral): keep trend_run unchanged (pause) — don't reset
                 confirmed = trend != 0 and trend_run >= args.trend_confirm and volume_ok
+                last_trend = trend  # CRITICAL: without this, the confirmation never advances
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 ai = mt5.account_info()
                 t = mt5.symbol_info_tick(args.symbol)
