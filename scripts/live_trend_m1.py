@@ -22,7 +22,6 @@ import MetaTrader5 as mt5
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-from london_gold.indicators import adx  # noqa: E402
 
 SYMBOL = "XAUUSD"
 USC = 100.0
@@ -61,9 +60,6 @@ def main():
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
-    p.add_argument("--adx-gate", type=float, default=22.0,
-                   help="volatility filter: only open when ADX >= this (small-move/noise "
-                        "regime with ADX below this is skipped, to avoid the $20-within losses)")
     p.add_argument("--di-gate", type=float, default=0.20,
                    help="direction-consistency filter: |+DI - -DI|/(+DI + -DI) must be >= this to "
                         "open. In a violent RANGE the two DI are roughly equal and this ratio "
@@ -207,18 +203,10 @@ def main():
                     crash_block_until = time.time() + args.crash_cooldown_sec
                     crash_block_dir = 1   # price dropped -> only block LONG rebounds
 
-                # volatility state filter: small-move (ADX low / band narrow) -> don't trade
-                # (the $20-within regime is where losses concentrate; avoid trading it).
-                volatility_ok = True
-                if args.adx_gate and args.adx_gate > 0:
-                    try:
-                        # use the verified library ADX (standard calculation)
-                        adx_series = adx(df["high"].astype(float), df["low"].astype(float),
-                                         df["close"].astype(float), 14)
-                        adx_val = float(adx_series.iloc[-1]) if not pd.isna(adx_series.iloc[-1]) else 0.0
-                        volatility_ok = adx_val >= args.adx_gate
-                    except Exception:
-                        volatility_ok = True
+                # volatility state filter: BYPASSED per user request (去掉了 ADX≥22 门槛).
+                # Now the entry does NOT require ADX; only trend-confirm(>=3)+volume + DI>=0.20
+                # + not-in-cooldown gate the open. (crash_drop / structure_break guards are kept.)
+                volatility_ok = True  # ADX gate removed: always pass.
 
                 # direction-consistency filter: tell a violent RANGE from a TREND. ADX stays
                 # high in a violent chop, so it cannot distinguish them. The +DI/-DI balance
@@ -359,8 +347,6 @@ def main():
                     log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
                         crash_block_until - time.time(),
                         "多" if crash_block_dir > 0 else "空"))
-                elif confirmed and cur == 0 and not volatility_ok:
-                    log(ts, "SKIP_LOWVOL", "小波动区(ADX低/带宽窄) - 不交易")
                 elif confirmed and cur == 0 and not direction_ok:
                     log(ts, "SKIP_RANGE", "震荡区(+DI≈-DI无方向) - 不交易, 避免来回打损")
 
