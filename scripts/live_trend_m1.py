@@ -118,6 +118,9 @@ def main():
     trend_run = 0
     peak_profit = 0.0
     crash_block_until = 0.0  # cooldown: no new entry after a crash/structure exit
+    crash_block_dir = 0      # direction the cooldown blocks (0=both). A crash means price
+                             # dropped -> block longs (catching the falling knife) but NOT shorts
+                             # (with-trend). This is the fix for "为什么没做空".
     try:
         while True:
             try:
@@ -187,9 +190,13 @@ def main():
                     elif cur < 0 and ask > es[-1] + buf:
                         structure_break = True          # 空单升破(含缓冲) -> 反转
 
-                # Even if flat, a cliff means stand aside: don't open into the falling knife.
+                # Even if flat, a cliff means stand aside. Direction-aware cooldown so it blocks
+                # the with-the-crash LONG (catching the falling knife) but DOES NOT block the
+                # with-trend SHORT. This is the fix for "为什么没做空": the old code blocked
+                # every direction, so a confirmed downtrend signal right after a drop was lost.
                 if cur == 0 and crash_drop:
                     crash_block_until = time.time() + args.crash_cooldown_sec
+                    crash_block_dir = 1   # price dropped -> only block LONG rebounds
 
                 # volatility state filter: small-move (ADX low / band narrow) -> don't trade
                 # (the $20-within regime is where losses concentrate; avoid trading it).
@@ -227,6 +234,7 @@ def main():
                                 close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                         peak_profit = 0.0
                         crash_block_until = time.time() + args.crash_cooldown_sec
+                        crash_block_dir = 1   # price dropped -> block LONG only, allow SHORT (with-trend)
                         time.sleep(args.cycle_sec); continue
                     if structure_break:
                         log(ts, "STRUCTURE", "跌破EMA%d趋势线(含%.1fATR缓冲) 熊市转头 - 全平规避" % (
@@ -236,6 +244,8 @@ def main():
                                 close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                         peak_profit = 0.0
                         crash_block_until = time.time() + args.crash_cooldown_sec
+                        crash_block_dir = cur  # trend broke against cur: block the same side we
+                                               # just exited, allow the with-trend opposite side
                         time.sleep(args.cycle_sec); continue
                     # --- ATR stop-loss (2xATR, confirmed rule; was previously computed
                     #     as stop_pts but never enforced) ---
@@ -288,10 +298,14 @@ def main():
                 # open fresh in trend direction ONLY when volatility is active (strong ADX /
                 # widening band), so we DON'T trade the $20-within tiny/noise regime where
                 # losses concentrate. 小波动(ADX低/带宽窄) -> 不做, 避免在无优势区间被点差消耗.
-                # Also blocked during the crash cooldown so we stand aside after a breakdown
-                # instead of re-buying the dip (趋势反转优先).
+                # Direction-aware crash cooldown: it only blocks the side that the crash/break
+                # turned AGAINST (catching the falling knife), and ALLOWS the with-trend side.
+                # crash_block_dir: +1 blocks LONG, -1 blocks SHORT, 0 blocks both (legacy).
                 in_crash_cooldown = time.time() < crash_block_until
-                if confirmed and cur == 0 and volatility_ok and not in_crash_cooldown:
+                blocked_by_cooldown = in_crash_cooldown and (
+                    crash_block_dir == 0 or (crash_block_dir > 0 and trend > 0) or
+                    (crash_block_dir < 0 and trend < 0))
+                if confirmed and cur == 0 and volatility_ok and not blocked_by_cooldown:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f (波动可交易)" % (
@@ -299,9 +313,10 @@ def main():
                         args.lot_size, price))
                     if not args.dry_run:
                         open_order(args.symbol, args.lot_size, otype, price, 202608, "open")
-                elif confirmed and cur == 0 and in_crash_cooldown:
-                    log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs - 不开新仓" % (
-                        crash_block_until - time.time()))
+                elif confirmed and cur == 0 and blocked_by_cooldown:
+                    log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
+                        crash_block_until - time.time(),
+                        "多" if crash_block_dir > 0 else "空"))
                 elif confirmed and cur == 0 and not volatility_ok:
                     log(ts, "SKIP_LOWVOL", "小波动区(ADX低/带宽窄) - 不交易")
 
