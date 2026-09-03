@@ -173,16 +173,28 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # full graded take-profit (你确认的 20/30/50 三档):
-                #   peak < $30        -> 回落到 peak-20 锁利
-                #   $30<=peak<=$50    -> 回落到 $30 锁利
-                #   peak > $50        -> 回落到 peak*0.70 锁利 (回撤30%)
+                # Use MT5's reported floating P&L. For XAUUSD this is pure price
+                # move against price_open, which already bakes in the spread (a BUY
+                # fills at the ask, is valued at the bid). Subtracting 0.37*oz here
+                # would double-count the spread and shift every graded-TP threshold.
                 if cur != 0 and pos:
-                    # Use MT5's reported floating P&L. For XAUUSD this is pure price
-                    # move against price_open, which already bakes in the spread (a BUY
-                    # fills at the ask, is valued at the bid). Subtracting 0.37*oz here
-                    # would double-count the spread and shift every graded-TP threshold.
                     profit = sum(x.profit for x in pos)
+                    # --- ATR stop-loss (2xATR, confirmed rule; was previously computed
+                    #     as stop_pts but never enforced) ---
+                    oz = sum(x.volume for x in pos) * USC
+                    stop_dollar = stop_pts * oz
+                    if stop_dollar > 0 and profit <= -stop_dollar:
+                        log(ts, "STOP", "浮亏$%.0f 触及2xATR止损($%.0f) - 平仓" % (
+                            abs(profit), stop_dollar))
+                        for x in pos:
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                        peak_profit = 0.0
+                        time.sleep(args.cycle_sec); continue
+                    # full graded take-profit (你确认的 20/30/50 三档):
+                    #   peak < $30        -> 回落到 peak-20 锁利
+                    #   $30<=peak<=$50    -> 回落到 $30 锁利
+                    #   peak > $50        -> 回落到 peak*0.70 锁利 (回撤30%)
                     if profit > 0:
                         peak_profit = max(peak_profit, profit)
                         P = peak_profit
