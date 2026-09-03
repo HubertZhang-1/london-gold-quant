@@ -53,8 +53,8 @@ def main():
                    help="override EMA5 smoothing alpha (default 2/(primary+1); lower=slower")
     p.add_argument("--ema-fast", type=int, default=10)
     p.add_argument("--ema-slow", type=int, default=30)
-    p.add_argument("--stop-usd", type=float, default=50.0,
-                   help="fixed max loss per position in USD (单笔≤$50). A 2xATR stop grows with "
+    p.add_argument("--stop-usd", type=float, default=20.0,
+                   help="fixed max loss per position in USD (单笔≤$20). A 2xATR stop grows with "
                         "volatility (hit ~$139 in a violent move), which lets large losses happen; "
                         "a fixed cap guarantees the worst case. Converted to points via lot size.")
     p.add_argument("--trend-confirm", type=int, default=3,
