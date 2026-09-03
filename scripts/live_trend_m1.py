@@ -73,6 +73,11 @@ def main():
                    help="breakdown guard: close a long when price falls below EMA<slow>, and a "
                         "short when price rises above EMA<slow> ('ema' = 牛市趋势线跌破/熊市转头). "
                         "Set to 'none' to disable.")
+    p.add_argument("--structure-buffer-atr", type=float, default=0.5,
+                   help="buffer band around EMA<slow> before a structure break is confirmed, in "
+                        "multiples of ATR. A long only breaks when price falls below "
+                        "EMA<slow> - buffer*ATR (a short above EMA<slow> + buffer*ATR), so normal "
+                        "whipsaw around the trend line does not false-trigger. 0 = old behaviour.")
     p.add_argument("--crash-cooldown-sec", type=float, default=60.0,
                    help="after a crash/structure close, block re-opening for this many seconds "
                         "(trend reversal takes priority; stand aside instead of re-buying the dip).")
@@ -170,13 +175,17 @@ def main():
                 # 1) intraday cliff: last 1-min close change (completed + forming bar)
                 last_1m_change = float(cl[-1] - cl[-2]) if len(cl) >= 2 else 0.0
                 crash_drop = args.crash_drop_pts > 0 and last_1m_change < -args.crash_drop_pts
-                # 2) structure breakdown: 多头跌破 EMA<slow> / 空头升破 EMA<slow> (熊市转头)
+                # 2) structure breakdown: 多头跌破 EMA<slow> / 空头升破 EMA<slow> (熊市转头).
+                #    Use a buffer band (buffer*ATR) around the EMA so a normal whipsaw around
+                #    the trend line does NOT false-trigger. Break is confirmed only when price
+                #    crosses beyond EMA +/- buffer*ATR.
                 structure_break = False
                 if args.structure_close.lower() == "ema" and cur != 0:
-                    if cur > 0 and bid < es[-1]:
-                        structure_break = True          # 多单跌破多头趋势线 -> 熊市转头
-                    elif cur < 0 and ask > es[-1]:
-                        structure_break = True          # 空单升破 -> 反转
+                    buf = args.structure_buffer_atr * atr_now
+                    if cur > 0 and bid < es[-1] - buf:
+                        structure_break = True          # 多单跌破多头趋势线(含缓冲) -> 熊市转头
+                    elif cur < 0 and ask > es[-1] + buf:
+                        structure_break = True          # 空单升破(含缓冲) -> 反转
 
                 # Even if flat, a cliff means stand aside: don't open into the falling knife.
                 if cur == 0 and crash_drop:
@@ -220,7 +229,8 @@ def main():
                         crash_block_until = time.time() + args.crash_cooldown_sec
                         time.sleep(args.cycle_sec); continue
                     if structure_break:
-                        log(ts, "STRUCTURE", "跌破EMA%d趋势线 熊市转头 - 全平规避" % args.ema_slow)
+                        log(ts, "STRUCTURE", "跌破EMA%d趋势线(含%.1fATR缓冲) 熊市转头 - 全平规避" % (
+                            args.ema_slow, args.structure_buffer_atr))
                         for x in pos:
                             if not args.dry_run:
                                 close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
