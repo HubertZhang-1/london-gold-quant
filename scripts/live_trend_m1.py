@@ -57,6 +57,9 @@ def main():
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
+    p.add_argument("--adx-gate", type=float, default=22.0,
+                   help="volatility filter: only open when ADX >= this (small-move/noise "
+                        "regime with ADX below this is skipped, to avoid the $20-within losses)")
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
                    help="close when profit retraces >= this from peak (0.30 = let it ride)")
@@ -148,6 +151,28 @@ def main():
                 atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(df) >= 14 else 1.0
                 stop_pts = args.stop_atr_mult * atr_now
 
+                # volatility state filter: small-move (ADX low / band narrow) -> don't trade
+                # (the $20-within regime is where losses concentrate; avoid trading it).
+                volatility_ok = True
+                if args.adx_gate and args.adx_gate > 0:
+                    try:
+                        h = df["high"].astype(float).to_numpy()
+                        l = df["low"].astype(float).to_numpy()
+                        c = df["close"].astype(float).to_numpy()
+                        up = np.diff(h, prepend=h[0])
+                        dn = -np.diff(l, prepend=l[0])
+                        tr_ = np.maximum(h - l, np.maximum(np.abs(h - np.roll(c, 1)), np.abs(l - np.roll(c, 1))))
+                        atr_ = ewm(tr_, 14)
+                        plus = ewm(np.where((up > dn) & (up > 0), up, 0.0), 14)
+                        minus = ewm(np.where((dn > up) & (dn > 0), dn, 0.0), 14)
+                        pdi = 100 * plus / atr_.clip(min=1e-9)
+                        mdi = 100 * minus / atr_.clip(min=1e-9)
+                        dx = 100 * np.abs(pdi - mdi) / np.clip(pdi + mdi, 1e-9, None)
+                        adx_val = float(pd.Series(dx).rolling(14).mean().iloc[-1])
+                        volatility_ok = adx_val >= args.adx_gate
+                    except Exception:
+                        volatility_ok = True
+
                 # equity floor
                 if args.equity_floor and pos and dd >= args.equity_floor:
                     log(ts, "EQUITY_FLOOR", "回撤%.0f%% 全平" % (dd * 100))
@@ -156,9 +181,10 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # graded take-profit — 严格按用户规则:
-                #   峰值 < $30  -> 回落到 peak-$20 锁利
-                #   峰值 >= $30 -> 回落到 $30 锁利 (浮盈80->30就落袋, 锁$30; 不再等峰值的比例)
+                # full graded take-profit (你确认的 20/30/50 三档):
+                #   peak < $30        -> 回落到 peak-20 锁利
+                #   $30<=peak<=$50    -> 回落到 $30 锁利
+                #   peak > $50        -> 回落到 peak*0.70 锁利 (回撤30%)
                 if cur != 0 and pos:
                     px_avg = float(np.mean([x.price_open for x in pos]))
                     last_fx = bid if cur > 0 else ask
@@ -169,8 +195,10 @@ def main():
                         P = peak_profit
                         if P < 30.0:
                             target = P - 20.0
-                        else:
+                        elif P <= 50.0:
                             target = 30.0
+                        else:
+                            target = P * 0.70
                         if target > 0 and profit <= target:
                             log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f) - 锁利" % (
                                 profit, target, P))
@@ -188,14 +216,19 @@ def main():
                         if not args.dry_run:
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     cur = 0
-                if confirmed and cur == 0:
+                # open fresh in trend direction ONLY when volatility is active (strong ADX /
+                # widening band), so we DON'T trade the $20-within tiny/noise regime where
+                # losses concentrate. 小波动(ADX低/带宽窄) -> 不做, 避免在无优势区间被点差消耗.
+                if confirmed and cur == 0 and volatility_ok:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
-                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f" % (
+                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f (波动可交易)" % (
                         trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
                         args.lot_size, price))
                     if not args.dry_run:
                         open_order(args.symbol, args.lot_size, otype, price, 202608, "open")
+                elif confirmed and cur == 0 and not volatility_ok:
+                    log(ts, "SKIP_LOWVOL", "小波动区(ADX低/带宽窄) - 不交易")
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
