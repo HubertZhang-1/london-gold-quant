@@ -61,6 +61,11 @@ def main():
     p.add_argument("--adx-gate", type=float, default=22.0,
                    help="volatility filter: only open when ADX >= this (small-move/noise "
                         "regime with ADX below this is skipped, to avoid the $20-within losses)")
+    p.add_argument("--di-gate", type=float, default=0.20,
+                   help="direction-consistency filter: |+DI - -DI|/(+DI + -DI) must be >= this to "
+                        "open. In a violent RANGE the two DI are roughly equal and this ratio "
+                        "collapses toward 0 (ADX stays high, so it is the ONLY reliable way to "
+                        "tell a chop from a trend). 0 = disabled.")
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
                    help="close when profit retraces >= this from peak (0.30 = let it ride)")
@@ -211,6 +216,33 @@ def main():
                     except Exception:
                         volatility_ok = True
 
+                # direction-consistency filter: tell a violent RANGE from a TREND. ADX stays
+                # high in a violent chop, so it cannot distinguish them. The +DI/-DI balance
+                # collapses toward 0 when both sides push equally (chop); it is high only when
+                # one direction clearly dominates. Ratio = |+DI - -DI| / (+DI + -DI).
+                direction_ok = True
+                if args.di_gate and args.di_gate > 0:
+                    try:
+                        up_move = df["high"].diff()
+                        down_move = -df["low"].diff()
+                        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0),
+                                                     up_move, 0.0), index=df.index)
+                        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0),
+                                                      down_move, 0.0), index=df.index)
+                        atr_di = pd.concat(
+                            [df["high"] - df["low"],
+                             (df["high"] - df["close"].shift()).abs(),
+                             (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
+                        atr_di = atr_di.ewm(alpha=1.0 / 14, adjust=False).mean()
+                        pdi = (100 * plus_dm.ewm(alpha=1.0 / 14, adjust=False).mean()
+                               / atr_di.replace(0, np.nan))
+                        mdi = (100 * minus_dm.ewm(alpha=1.0 / 14, adjust=False).mean()
+                               / atr_di.replace(0, np.nan))
+                        di_ratio = abs(pdi.iloc[-1] - mdi.iloc[-1]) / (pdi.iloc[-1] + mdi.iloc[-1])
+                        direction_ok = not pd.isna(di_ratio) and di_ratio >= args.di_gate
+                    except Exception:
+                        direction_ok = True
+
                 # equity floor
                 if args.equity_floor and pos and dd >= args.equity_floor:
                     log(ts, "EQUITY_FLOOR", "回撤%.0f%% 全平" % (dd * 100))
@@ -305,7 +337,7 @@ def main():
                 blocked_by_cooldown = in_crash_cooldown and (
                     crash_block_dir == 0 or (crash_block_dir > 0 and trend > 0) or
                     (crash_block_dir < 0 and trend < 0))
-                if confirmed and cur == 0 and volatility_ok and not blocked_by_cooldown:
+                if confirmed and cur == 0 and volatility_ok and direction_ok and not blocked_by_cooldown:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f (波动可交易)" % (
@@ -319,6 +351,8 @@ def main():
                         "多" if crash_block_dir > 0 else "空"))
                 elif confirmed and cur == 0 and not volatility_ok:
                     log(ts, "SKIP_LOWVOL", "小波动区(ADX低/带宽窄) - 不交易")
+                elif confirmed and cur == 0 and not direction_ok:
+                    log(ts, "SKIP_RANGE", "震荡区(+DI≈-DI无方向) - 不交易, 避免来回打损")
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
