@@ -156,11 +156,9 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # graded take-profit (分级止盈)
-                # 浮盈进入后:
-                #   peak < $30   -> 回落 target = peak - $20  (锁"峰值-20")
-                #   $30<=peak<=$50 -> target = $30            (固定锁$30)
-                #   peak > $50   -> target = peak * 0.70      (锁峰值的70% / 回撤30%)
+                # graded take-profit — 严格按用户规则:
+                #   峰值 < $30  -> 回落到 peak-$20 锁利
+                #   峰值 >= $30 -> 回落到 $30 锁利 (浮盈80->30就落袋, 锁$30; 不再等峰值的比例)
                 if cur != 0 and pos:
                     px_avg = float(np.mean([x.price_open for x in pos]))
                     last_fx = bid if cur > 0 else ask
@@ -171,10 +169,8 @@ def main():
                         P = peak_profit
                         if P < 30.0:
                             target = P - 20.0
-                        elif P <= 50.0:
-                            target = 30.0
                         else:
-                            target = P * 0.70
+                            target = 30.0
                         if target > 0 and profit <= target:
                             log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f) - 锁利" % (
                                 profit, target, P))
