@@ -54,7 +54,10 @@ def main():
                    help="override EMA5 smoothing alpha (default 2/(primary+1); lower=slower")
     p.add_argument("--ema-fast", type=int, default=10)
     p.add_argument("--ema-slow", type=int, default=30)
-    p.add_argument("--stop-atr-mult", type=float, default=2.0)
+    p.add_argument("--stop-usd", type=float, default=50.0,
+                   help="fixed max loss per position in USD (单笔≤$50). A 2xATR stop grows with "
+                        "volatility (hit ~$139 in a violent move), which lets large losses happen; "
+                        "a fixed cap guarantees the worst case. Converted to points via lot size.")
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
@@ -177,7 +180,8 @@ def main():
                                 np.maximum((df["high"] - df["close"].shift()).abs().astype(float),
                                            (df["low"] - df["close"].shift()).abs().astype(float)))
                 atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(df) >= 14 else 1.0
-                stop_pts = args.stop_atr_mult * atr_now
+                # ATR stop (fallback only when --stop-usd is 0; primary cap is the fixed $).
+                stop_pts = 2.0 * atr_now
 
                 # --- crash/breakdown guards (慢涨防暴跌) ---
                 # 1) intraday cliff: last 1-min close change (completed + forming bar)
@@ -279,13 +283,14 @@ def main():
                         crash_block_dir = cur  # trend broke against cur: block the same side we
                                                # just exited, allow the with-trend opposite side
                         time.sleep(args.cycle_sec); continue
-                    # --- ATR stop-loss (2xATR, confirmed rule; was previously computed
-                    #     as stop_pts but never enforced) ---
+                    # --- 固定金额止损 (单笔≤$50, 杜绝大亏损). A 2xATR stop is computed as
+                    #     stop_pts but grows with volatility (hit ~$139 in a violent move it
+                    #     could NOT catch), so it is superseded by a fixed dollar cap. ---
                     oz = sum(x.volume for x in pos) * USC
-                    stop_dollar = stop_pts * oz
+                    stop_dollar = args.stop_usd if args.stop_usd > 0 else (stop_pts * oz)
                     if stop_dollar > 0 and profit <= -stop_dollar:
-                        log(ts, "STOP", "浮亏$%.0f 触及2xATR止损($%.0f) - 平仓" % (
-                            abs(profit), stop_dollar))
+                        log(ts, "STOP", "浮亏$%.0f 触及固定止损($%.0f, %.2f点/%.1f手) - 平仓" % (
+                            abs(profit), stop_dollar, stop_dollar / oz, sum(x.volume for x in pos)))
                         for x in pos:
                             if not args.dry_run:
                                 close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
