@@ -232,8 +232,11 @@ def main():
                                 if not args.dry_run:
                                     close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                             peak_profit = 0.0
-                    else:
-                        peak_profit = 0.0  # reset if profit falls back below activation
+                    elif profit < args.tp_activate_profit and peak_profit <= 0:
+                        # Not yet activated: keep peak at 0 (no trailing until activated).
+                        peak_profit = 0.0
+                    # IMPORTANT: DON'T reset peak_profit when profit dips below activation
+                    # mid-run — that would lower the trail trigger and lock in too late.
 
                 # reversal: trend flipped vs current position -> close + reopen on trend side
                 if confirmed and cur != 0 and trend != cur:
