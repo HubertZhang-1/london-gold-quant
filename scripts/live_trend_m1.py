@@ -60,11 +60,6 @@ def main():
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
-    p.add_argument("--di-gate", type=float, default=0.20,
-                   help="direction-consistency filter: |+DI - -DI|/(+DI + -DI) must be >= this to "
-                        "open. In a violent RANGE the two DI are roughly equal and this ratio "
-                        "collapses toward 0 (ADX stays high, so it is the ONLY reliable way to "
-                        "tell a chop from a trend). 0 = disabled.")
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
                    help="close when profit retraces >= this from peak (0.30 = let it ride)")
@@ -208,32 +203,11 @@ def main():
                 # + not-in-cooldown gate the open. (crash_drop / structure_break guards are kept.)
                 volatility_ok = True  # ADX gate removed: always pass.
 
-                # direction-consistency filter: tell a violent RANGE from a TREND. ADX stays
-                # high in a violent chop, so it cannot distinguish them. The +DI/-DI balance
-                # collapses toward 0 when both sides push equally (chop); it is high only when
-                # one direction clearly dominates. Ratio = |+DI - -DI| / (+DI + -DI).
-                direction_ok = True
-                if args.di_gate and args.di_gate > 0:
-                    try:
-                        up_move = df["high"].diff()
-                        down_move = -df["low"].diff()
-                        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0),
-                                                     up_move, 0.0), index=df.index)
-                        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0),
-                                                      down_move, 0.0), index=df.index)
-                        atr_di = pd.concat(
-                            [df["high"] - df["low"],
-                             (df["high"] - df["close"].shift()).abs(),
-                             (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
-                        atr_di = atr_di.ewm(alpha=1.0 / 14, adjust=False).mean()
-                        pdi = (100 * plus_dm.ewm(alpha=1.0 / 14, adjust=False).mean()
-                               / atr_di.replace(0, np.nan))
-                        mdi = (100 * minus_dm.ewm(alpha=1.0 / 14, adjust=False).mean()
-                               / atr_di.replace(0, np.nan))
-                        di_ratio = abs(pdi.iloc[-1] - mdi.iloc[-1]) / (pdi.iloc[-1] + mdi.iloc[-1])
-                        direction_ok = not pd.isna(di_ratio) and di_ratio >= args.di_gate
-                    except Exception:
-                        direction_ok = True
+                # direction-consistency filter: BYPASSED per user request (去掉了 DI≥0.20).
+                # Entry no longer requires a direction-consistency gate; only trend-confirm
+                # (>=3)+volume + not-in-cooldown gate the open. (crash_drop / structure_break
+                # guards and the fixed-$50 SL are kept.)
+                direction_ok = True  # DI gate removed: always pass.
 
                 # equity floor
                 if args.equity_floor and pos and dd >= args.equity_floor:
@@ -347,8 +321,6 @@ def main():
                     log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
                         crash_block_until - time.time(),
                         "多" if crash_block_dir > 0 else "空"))
-                elif confirmed and cur == 0 and not direction_ok:
-                    log(ts, "SKIP_RANGE", "震荡区(+DI≈-DI无方向) - 不交易, 避免来回打损")
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
