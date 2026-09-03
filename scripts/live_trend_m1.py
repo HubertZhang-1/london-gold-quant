@@ -58,7 +58,8 @@ def main():
                    help="require this many consecutive same trend (M1 churn -> higher confirm)")
     p.add_argument("--volume-mult", type=float, default=0.8)
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
-    p.add_argument("--tp-trail-pct", type=float, default=0.10)
+    p.add_argument("--tp-trail-pct", type=float, default=0.30,
+                   help="close when profit retraces >= this from peak (0.30 = let it ride)")
     p.add_argument("--equity-floor", type=float, default=0.30)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_m1_log.csv"))
