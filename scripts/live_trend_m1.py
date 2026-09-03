@@ -120,6 +120,7 @@ def main():
     crash_block_dir = 0      # direction the cooldown blocks (0=both). A crash means price
                              # dropped -> block longs (catching the falling knife) but NOT shorts
                              # (with-trend). This is the fix for "为什么没做空".
+    last_open_ts = 0.0       # guard: prevents a re-open race when positions_get reads stale
     try:
         while True:
             try:
@@ -304,7 +305,8 @@ def main():
                 blocked_by_cooldown = in_crash_cooldown and (
                     crash_block_dir == 0 or (crash_block_dir > 0 and trend > 0) or
                     (crash_block_dir < 0 and trend < 0))
-                if confirmed and cur == 0 and volatility_ok and direction_ok and not blocked_by_cooldown:
+                if confirmed and cur == 0 and volatility_ok and direction_ok and not blocked_by_cooldown \
+                        and (time.time() - last_open_ts) > 5.0:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     # 真实SL挂单: MT5终端在价格触及止损价瞬间成交, 零滑点.
@@ -316,7 +318,17 @@ def main():
                         trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
                         args.lot_size, price, sl))
                     if not args.dry_run:
-                        open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
+                        res = open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
+                        # Refresh position immediately so the next loop does NOT think we are
+                        # flat and re-open on top of the just-filled order (position_id race).
+                        if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
+                            time.sleep(0.5)
+                            pos2 = mt5.positions_get(symbol=args.symbol) or []
+                            cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos2) else \
+                                  (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos2) else 0)
+                            pos = pos2
+                            peak_profit = 0.0
+                            last_open_ts = time.time()
                 elif confirmed and cur == 0 and blocked_by_cooldown:
                     log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
                         crash_block_until - time.time(),
