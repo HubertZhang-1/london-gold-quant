@@ -156,22 +156,33 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # trailing take-profit
+                # graded take-profit (分级止盈)
+                # 浮盈进入后:
+                #   peak < $30   -> 回落 target = peak - $20  (锁"峰值-20")
+                #   $30<=peak<=$50 -> target = $30            (固定锁$30)
+                #   peak > $50   -> target = peak * 0.70      (锁峰值的70% / 回撤30%)
                 if cur != 0 and pos:
                     px_avg = float(np.mean([x.price_open for x in pos]))
                     last_fx = bid if cur > 0 else ask
                     gross = (last_fx - px_avg) * sum(x.volume for x in pos) * USC
                     profit = gross - 0.37 * sum(x.volume for x in pos) * USC
-                    if profit >= args.tp_activate_profit:
+                    if profit > 0:
                         peak_profit = max(peak_profit, profit)
-                        if profit <= peak_profit * (1 - args.tp_trail_pct):
-                            log(ts, "TRAIL_TP", "浮盈$%.0f 从峰值$%.0f回落%.0f%% 锁利" % (
-                                profit, peak_profit, (1 - profit / peak_profit) * 100))
+                        P = peak_profit
+                        if P < 30.0:
+                            target = P - 20.0
+                        elif P <= 50.0:
+                            target = 30.0
+                        else:
+                            target = P * 0.70
+                        if target > 0 and profit <= target:
+                            log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f) - 锁利" % (
+                                profit, target, P))
                             for x in pos:
                                 if not args.dry_run:
                                     close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                             peak_profit = 0.0
-                    elif profit < args.tp_activate_profit and peak_profit <= 0:
+                    else:
                         peak_profit = 0.0
 
                 # reversal
