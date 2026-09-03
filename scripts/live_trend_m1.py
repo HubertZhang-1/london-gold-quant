@@ -65,6 +65,17 @@ def main():
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
                    help="close when profit retraces >= this from peak (0.30 = let it ride)")
     p.add_argument("--equity-floor", type=float, default=0.30)
+    p.add_argument("--crash-drop-pts", type=float, default=2.0,
+                   help="intraday cliff guard: close all if the last 1-min close change drops "
+                        "below -this many points (catches a single crash candle that a slow "
+                        "2xATR stop cannot intercept). 0 = disabled.")
+    p.add_argument("--structure-close", type=str, default="ema",
+                   help="breakdown guard: close a long when price falls below EMA<slow>, and a "
+                        "short when price rises above EMA<slow> ('ema' = 牛市趋势线跌破/熊市转头). "
+                        "Set to 'none' to disable.")
+    p.add_argument("--crash-cooldown-sec", type=float, default=60.0,
+                   help="after a crash/structure close, block re-opening for this many seconds "
+                        "(trend reversal takes priority; stand aside instead of re-buying the dip).")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_m1_log.csv"))
     args = p.parse_args()
@@ -101,6 +112,7 @@ def main():
     last_trend = 0
     trend_run = 0
     peak_profit = 0.0
+    crash_block_until = 0.0  # cooldown: no new entry after a crash/structure exit
     try:
         while True:
             try:
@@ -154,6 +166,22 @@ def main():
                 atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(df) >= 14 else 1.0
                 stop_pts = args.stop_atr_mult * atr_now
 
+                # --- crash/breakdown guards (慢涨防暴跌) ---
+                # 1) intraday cliff: last 1-min close change (completed + forming bar)
+                last_1m_change = float(cl[-1] - cl[-2]) if len(cl) >= 2 else 0.0
+                crash_drop = args.crash_drop_pts > 0 and last_1m_change < -args.crash_drop_pts
+                # 2) structure breakdown: 多头跌破 EMA<slow> / 空头升破 EMA<slow> (熊市转头)
+                structure_break = False
+                if args.structure_close.lower() == "ema" and cur != 0:
+                    if cur > 0 and bid < es[-1]:
+                        structure_break = True          # 多单跌破多头趋势线 -> 熊市转头
+                    elif cur < 0 and ask > es[-1]:
+                        structure_break = True          # 空单升破 -> 反转
+
+                # Even if flat, a cliff means stand aside: don't open into the falling knife.
+                if cur == 0 and crash_drop:
+                    crash_block_until = time.time() + args.crash_cooldown_sec
+
                 # volatility state filter: small-move (ADX low / band narrow) -> don't trade
                 # (the $20-within regime is where losses concentrate; avoid trading it).
                 volatility_ok = True
@@ -181,6 +209,24 @@ def main():
                 # would double-count the spread and shift every graded-TP threshold.
                 if cur != 0 and pos:
                     profit = sum(x.profit for x in pos)
+                    # --- 慢涨防暴跌: 三层防护, 最高优先级 ---
+                    if crash_drop:
+                        log(ts, "CRASH", "单分钟急跌%.2f点 (基线>%.1f) - 立即全平" % (
+                            last_1m_change, args.crash_drop_pts))
+                        for x in pos:
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                        peak_profit = 0.0
+                        crash_block_until = time.time() + args.crash_cooldown_sec
+                        time.sleep(args.cycle_sec); continue
+                    if structure_break:
+                        log(ts, "STRUCTURE", "跌破EMA%d趋势线 熊市转头 - 全平规避" % args.ema_slow)
+                        for x in pos:
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                        peak_profit = 0.0
+                        crash_block_until = time.time() + args.crash_cooldown_sec
+                        time.sleep(args.cycle_sec); continue
                     # --- ATR stop-loss (2xATR, confirmed rule; was previously computed
                     #     as stop_pts but never enforced) ---
                     oz = sum(x.volume for x in pos) * USC
@@ -232,7 +278,10 @@ def main():
                 # open fresh in trend direction ONLY when volatility is active (strong ADX /
                 # widening band), so we DON'T trade the $20-within tiny/noise regime where
                 # losses concentrate. 小波动(ADX低/带宽窄) -> 不做, 避免在无优势区间被点差消耗.
-                if confirmed and cur == 0 and volatility_ok:
+                # Also blocked during the crash cooldown so we stand aside after a breakdown
+                # instead of re-buying the dip (趋势反转优先).
+                in_crash_cooldown = time.time() < crash_block_until
+                if confirmed and cur == 0 and volatility_ok and not in_crash_cooldown:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
                     log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f (波动可交易)" % (
@@ -240,6 +289,9 @@ def main():
                         args.lot_size, price))
                     if not args.dry_run:
                         open_order(args.symbol, args.lot_size, otype, price, 202608, "open")
+                elif confirmed and cur == 0 and in_crash_cooldown:
+                    log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs - 不开新仓" % (
+                        crash_block_until - time.time()))
                 elif confirmed and cur == 0 and not volatility_ok:
                     log(ts, "SKIP_LOWVOL", "小波动区(ADX低/带宽窄) - 不交易")
 
