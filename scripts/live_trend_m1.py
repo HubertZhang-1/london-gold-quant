@@ -61,7 +61,12 @@ def main():
                         "widens/narrows with volatility (2xATR is the confirmed rule). This is the "
                         "primary stop, attached as a server-side SL at open.")
     p.add_argument("--trend-confirm", type=int, default=3,
-                   help="require this many consecutive same trend (M1 churn -> higher confirm)")
+                   help="require this many consecutive same trend to confirm entry")
+    p.add_argument("--bar-sec", type=float, default=10.0,
+                   help="candle period in seconds for the trend bars (per user: 10s). Bars are "
+                        "aggregated from ticks (open/high/low/close), and EMA5/10/30 + trend are "
+                        "computed on this sub-minute series instead of M1. Smaller = faster "
+                        "trend response but more noise.")
     p.add_argument("--volume-mult", type=float, default=0.8)
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
@@ -133,62 +138,101 @@ def main():
                 df = pd.DataFrame(rates)
                 cl = df["close"].astype(float).to_numpy()
                 ts = datetime.now().strftime("%H:%M:%S")
-                # trend (EMA5 primary + EMA10/30 background)
-                al = (2 / (args.ema_primary + 1)) if args.ema_alpha is None else args.ema_alpha
-                ep = ewm(cl, alpha=al); ef = ewm(cl, args.ema_fast); es = ewm(cl, args.ema_slow)
-                s_primary = 1 if cl[-1] > ep[-1] else (-1 if cl[-1] < ep[-1] else 0)
-                s_bg = 0
-                if cl[-1] > ef[-1] > es[-1]:
-                    s_bg = 1
-                elif cl[-1] < ef[-1] < es[-1]:
-                    s_bg = -1
-                score = 2 * s_primary + 1 * s_bg
-                trend = 1 if score > 0 else (-1 if score < 0 else 0)
 
-                # volume confirm
+                t = mt5.symbol_info_tick(args.symbol)
+                bid = t.bid; ask = t.ask
+                al = (2 / (args.ema_primary + 1)) if args.ema_alpha is None else args.ema_alpha
+
+                # --- sub-minute trend bars (per user: bar-sec=10s) aggregated from ticks ---
+                # Build a OHLCV series at the sub-minute cadence, then run EMA5/10/30 + trend on
+                # the bar closes. This gives a faster trend response than M1 (one bar = 10s).
+                bar_sec = args.bar_sec if args.bar_sec and args.bar_sec > 0 else 60.0
+                try:
+                    from datetime import timedelta as _td
+                    # Pull enough ticks to form >= ~120 sub-minute bars (EMA30 + ATR14 need warm-up).
+                    max_ticks = 20000
+                    lookback_sec = max(3600.0, 1.6 * 2000 * bar_sec)
+                    ticks = mt5.copy_ticks_from(args.symbol, datetime.now() - _td(seconds=lookback_sec),
+                                                max_ticks, mt5.COPY_TICKS_ALL)
+                except Exception:
+                    ticks = None
+                if ticks is not None and len(ticks) >= max(args.ema_slow, 5):
+                    tf = pd.DataFrame(ticks)
+                    tf["ts10"] = (pd.to_datetime(tf["time"], unit="s")
+                                  .dt.floor(str(int(bar_sec)) + "s"))
+                    tf["mid"] = 0.5 * (tf["bid"] + tf["ask"])
+                    bars = tf.groupby("ts10")["mid"].agg(["first", "max", "min", "last"])
+                    bcl = bars["last"].to_numpy()
+                    bhi = bars["max"].to_numpy()
+                    blo = bars["min"].to_numpy()
+                    prices = bars["first"].to_numpy()
+                    price = bcl[-1]
+                    ep = ewm(bcl, alpha=al); ef = ewm(bcl, args.ema_fast); es = ewm(bcl, args.ema_slow)
+                    s_primary = 1 if price > ep[-1] else (-1 if price < ep[-1] else 0)
+                    s_bg = 0
+                    if price > ef[-1] > es[-1]:
+                        s_bg = 1
+                    elif price < ef[-1] < es[-1]:
+                        s_bg = -1
+                    score = 2 * s_primary + 1 * s_bg
+                    trend = 1 if score > 0 else (-1 if score < 0 else 0)
+                    # volume confirm: bar tick-count vs recent average
+                    vol = tf.groupby("ts10").size().to_numpy()
+                else:
+                    trend = 0
+                    vol = None
+                    bcl = bhi = blo = np.array([])
+                    prices = np.array([])
+                    ep = es = ef = np.array([])
+
+                # volume confirm (from sub-minute bars when available, else M1)
                 volume_ok = True
                 if args.volume_mult > 0:
                     try:
-                        vol = df["tick_volume"].astype(float).to_numpy()
-                        volume_ok = vol[-1] >= vol[-40:].mean() * args.volume_mult
+                        if vol is not None and len(vol) >= 5:
+                            volume_ok = vol[-1] >= (vol[-40:].mean() if len(vol) >= 40 else vol.mean()) * args.volume_mult
+                        else:
+                            vol_m1 = df["tick_volume"].astype(float).to_numpy()
+                            volume_ok = vol_m1[-1] >= vol_m1[-40:].mean() * args.volume_mult
                     except Exception:
                         volume_ok = True
-                # trend confirm (higher count for M1 churn)
+                # trend confirm: count consecutive same-trend bars
                 if trend != 0 and trend == last_trend:
                     trend_run += 1
                 else:
                     trend_run = 1 if trend != 0 else 0
+                last_trend = trend
                 confirmed = (trend != 0 and trend_run >= args.trend_confirm and volume_ok)
 
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 ai = mt5.account_info()
-                t = mt5.symbol_info_tick(args.symbol)
-                bid = t.bid; ask = t.ask
                 dd = (ai.balance - ai.equity) / ai.balance if ai and ai.balance > 0 else 0
                 cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos) else \
                       (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos) else 0)
                 if cur == 0:
                     peak_profit = 0.0  # fresh position -> reset peak (avoid cross-trade leak)
 
-                # ATR stop
-                tr = np.maximum(df["high"] - df["low"],
-                                np.maximum((df["high"] - df["close"].shift()).abs().astype(float),
-                                           (df["low"] - df["close"].shift()).abs().astype(float)))
-                atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(df) >= 14 else 1.0
+                # ATR stop (computed on the sub-minute bars, consistent with the trend)
+                if len(bcl) >= 3:
+                    prev = np.concatenate([[bcl[0]], bcl[:-1]])
+                    tr = np.maximum(np.maximum(bhi - blo, np.abs(bhi - prev)), np.abs(blo - prev))
+                    atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(tr) >= 14 else float(tr[-14:].mean())
+                else:
+                    atr_now = float((df["high"] - df["low"]).tail(14).mean()) if len(df) >= 14 else 1.0
                 # ATR stop: primary stop is stop_atr_mult x ATR (confirmed rule). A fixed --stop-usd
                 # overrides only if explicitly set > 0.
                 stop_pts = args.stop_atr_mult * atr_now
 
                 # --- crash/breakdown guards (慢涨防暴跌) ---
-                # 1) intraday cliff: last 1-min close change (completed + forming bar)
-                last_1m_change = float(cl[-1] - cl[-2]) if len(cl) >= 2 else 0.0
-                crash_drop = args.crash_drop_pts > 0 and last_1m_change < -args.crash_drop_pts
+                # 1) intraday cliff: last bar close change (sub-minute)
+                last_bar_change = float(bcl[-1] - bcl[-2]) if len(bcl) >= 2 else 0.0
+                crash_drop = args.crash_drop_pts > 0 and last_bar_change < -args.crash_drop_pts
                 # 2) structure breakdown: 多头跌破 EMA<slow> / 空头升破 EMA<slow> (熊市转头).
                 #    Use a buffer band (buffer*ATR) around the EMA so a normal whipsaw around
                 #    the trend line does NOT false-trigger. Break is confirmed only when price
                 #    crosses beyond EMA +/- buffer*ATR.
                 structure_break = False
-                if args.structure_close.lower() == "ema" and cur != 0:
+                if args.structure_close.lower() == "ema" and cur != 0 and len(es) >= 1:
                     buf = args.structure_buffer_atr * atr_now
                     if cur > 0 and bid < es[-1] - buf:
                         structure_break = True          # 多单跌破多头趋势线(含缓冲) -> 熊市转头
