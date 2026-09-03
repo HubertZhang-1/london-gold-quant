@@ -73,6 +73,10 @@ def main():
                    help="hard stop = this * ATR (to avoid riding a loss; 0 disables)")
     p.add_argument("--trend-confirm", type=int, default=2,
                    help="consecutive bars of the same trend before reversing (filters EMA jitter)")
+    p.add_argument("--volume-mult", type=float, default=0.8,
+                   help="require the last M5 tick_volume >= mean * this before trusting the "
+                        "EMA trend (0.8 filters only significant volume-collapse/fake signals; "
+                        "1.2 would be too strict as only ~25% of bars clear it; 0 disables)")
     p.add_argument("--equity-floor", type=float, default=0.30)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--log", default=str(PROJECT_ROOT / "reports" / "live_trend_tracker_log.csv"))
@@ -111,13 +115,27 @@ def main():
                 if rates is None or len(rates) < args.ema_slow:
                     time.sleep(args.cycle_sec); continue
                 trend = ema_trend(rates, args.ema_fast, args.ema_slow)
+                # volume-confirmation factor: only trust an EMA signal when the last M5 bar
+                # traded on real turnover (tick_volume >= mean * volume_mult). A low-volume
+                # EMA flip is likely a虚假/fake signal -> ignore it (wait for volume).
+                volume_ok = True
+                if args.volume_mult > 0:
+                    try:
+                        import pandas as _pd
+                        _df = _pd.DataFrame(rates)
+                        vol = _df["tick_volume"].astype(float).to_numpy()
+                        last_vol = vol[-1]
+                        mean_vol = float(vol[-20:].mean()) if len(vol) >= 20 else float(vol.mean())
+                        volume_ok = last_vol >= mean_vol * args.volume_mult if mean_vol > 0 else True
+                    except Exception:
+                        volume_ok = True
                 # trend-confirmation guard: count consecutive same non-zero trend bars, so a
                 # single EMA-jitter bar doesn't trigger a false reverse.
                 if trend != 0 and trend == last_trend:
                     trend_run += 1
                 else:
                     trend_run = 1 if trend != 0 else 0
-                confirmed = trend != 0 and trend_run >= args.trend_confirm
+                confirmed = trend != 0 and trend_run >= args.trend_confirm and volume_ok
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 ai = mt5.account_info()
                 t = mt5.symbol_info_tick(args.symbol)
