@@ -144,6 +144,8 @@ def main():
                 dd = (ai.balance - ai.equity) / ai.balance if ai and ai.balance > 0 else 0
                 cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos) else \
                       (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos) else 0)
+                if cur == 0:
+                    peak_profit = 0.0  # fresh position -> reset peak (avoid cross-trade leak)
 
                 # ATR stop
                 tr = np.maximum(df["high"] - df["low"],
@@ -191,20 +193,25 @@ def main():
                                 close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                         peak_profit = 0.0
                         time.sleep(args.cycle_sec); continue
-                    # full graded take-profit (你确认的 20/30/50 三档):
-                    #   peak < $30        -> 回落到 peak-20 锁利
-                    #   $30<=peak<=$50    -> 回落到 $30 锁利
-                    #   peak > $50        -> 回落到 peak*0.70 锁利 (回撤30%)
+                    # full graded take-profit (你确认的规则: 浮盈>20后, 跌回$20锁利).
+                    # $20 是锁利地线; 峰值越高锁利越高:
+                    #   峰值 <  $20 -> 未激活, 不锁
+                    #   $20<=峰值<$30 -> 回落到 $20 锁利
+                    #   $30<=峰值<=$50 -> 回落到 $30 锁利
+                    #   峰值 >  $50    -> 回落到 peak*0.70 锁利 (回撤30%)
                     if profit > 0:
                         peak_profit = max(peak_profit, profit)
                         P = peak_profit
-                        if P < 30.0:
-                            target = P - 20.0
+                        if P < 20.0:
+                            target = None            # 浮盈未超过$20, 不锁
+                        elif P < 30.0:
+                            target = 20.0            # 跌回$20锁利
                         elif P <= 50.0:
                             target = 30.0
                         else:
                             target = P * 0.70
-                        if target > 0 and profit <= target:
+                        # 仅在真正回撤(profit<P)时触发, 避免触及峰值瞬间提前锁利
+                        if target is not None and profit <= target and profit < P:
                             log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f) - 锁利" % (
                                 profit, target, P))
                             for x in pos:
@@ -220,6 +227,7 @@ def main():
                     for x in pos:
                         if not args.dry_run:
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                    peak_profit = 0.0
                     cur = 0
                 # open fresh in trend direction ONLY when volatility is active (strong ADX /
                 # widening band), so we DON'T trade the $20-within tiny/noise regime where
