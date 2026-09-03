@@ -185,17 +185,9 @@ def main():
                     prices = np.array([])
                     ep = es = ef = np.array([])
 
-                # volume confirm (from sub-minute bars when available, else M1)
+                # volume confirm: BYPASSED per user request (去掉了量能放量过滤).
+                # Entry no longer requires volume to spike; only trend-confirm(>=3) + not-in-cooldown.
                 volume_ok = True
-                if args.volume_mult > 0:
-                    try:
-                        if vol is not None and len(vol) >= 5:
-                            volume_ok = vol[-1] >= (vol[-40:].mean() if len(vol) >= 40 else vol.mean()) * args.volume_mult
-                        else:
-                            vol_m1 = df["tick_volume"].astype(float).to_numpy()
-                            volume_ok = vol_m1[-1] >= vol_m1[-40:].mean() * args.volume_mult
-                    except Exception:
-                        volume_ok = True
                 # trend confirm: count consecutive same-trend bars
                 if trend != 0 and trend == last_trend:
                     trend_run += 1
