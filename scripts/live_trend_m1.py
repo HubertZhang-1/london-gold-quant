@@ -62,11 +62,11 @@ def main():
                         "primary stop, attached as a server-side SL at open.")
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend to confirm entry")
-    p.add_argument("--bar-sec", type=float, default=60.0,
-                   help="candle period in seconds for the trend bars (降频到 M1=60s per user). Bars "
-                        "are aggregated from ticks (open/high/low/close), and EMA5/10/30 + trend are "
-                        "computed on this series. Larger = lower frequency = fewer trades / less "
-                        "spread cost; smaller (10s) = faster but noisier.")
+    p.add_argument("--bar-sec", type=float, default=20.0,
+                   help="candle period in seconds for the trend bars (per user: 20s). Bars are "
+                        "aggregated from ticks (open/high/low/close), and EMA5/10/30 + trend are "
+                        "computed on this series. Smaller = faster response but more noise; "
+                        "larger = lower frequency / less spread cost.")
     p.add_argument("--volume-mult", type=float, default=0.8)
     p.add_argument("--tp-activate-profit", type=float, default=50.0)
     p.add_argument("--tp-trail-pct", type=float, default=0.30,
