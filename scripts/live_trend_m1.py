@@ -127,11 +127,8 @@ def main():
     print("=" * 62)
     last_trend = 0
     trend_run = 0
-    peak_profit = 0.0
-    crash_block_until = 0.0  # cooldown: no new entry after a crash/structure exit
-    crash_block_dir = 0      # direction the cooldown blocks (0=both). A crash means price
-                             # dropped -> block longs (catching the falling knife) but NOT shorts
-                             # (with-trend). This is the fix for "为什么没做空".
+    peak_buy = 0.0   # peak profit of the BUY leg (for >$50 / 30% retrace)
+    peak_sell = 0.0  # peak profit of the SELL leg
     last_open_ts = 0.0       # guard: prevents a re-open race when positions_get reads stale
     try:
         while True:
@@ -214,10 +211,8 @@ def main():
                 pos = mt5.positions_get(symbol=args.symbol) or []
                 ai = mt5.account_info()
                 dd = (ai.balance - ai.equity) / ai.balance if ai and ai.balance > 0 else 0
-                cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos) else \
-                      (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos) else 0)
-                if cur == 0:
-                    peak_profit = 0.0  # fresh position -> reset peak (avoid cross-trade leak)
+                buys = [x for x in pos if x.type == mt5.POSITION_TYPE_BUY]
+                sells = [x for x in pos if x.type == mt5.POSITION_TYPE_SELL]
 
                 # ATR stop (computed on the sub-minute bars, consistent with the trend)
                 if len(bcl) >= 3:
@@ -226,19 +221,11 @@ def main():
                     atr_now = float(pd.Series(tr).rolling(14).mean().iloc[-1]) if len(tr) >= 14 else float(tr[-14:].mean())
                 else:
                     atr_now = float((df["high"] - df["low"]).tail(14).mean()) if len(df) >= 14 else 1.0
-                # ATR stop: primary stop is stop_atr_mult x ATR (confirmed rule). A fixed --stop-usd
-                # overrides only if explicitly set > 0.
                 stop_pts = args.stop_atr_mult * atr_now
 
                 # (crash/breakdown guards 已按用户要求去掉; 仅保留 H1 结构止损.)
-                # volatility state filter: BYPASSED per user request (去掉了 ADX≥22 门槛).
-                volatility_ok = True  # ADX gate removed: always pass.
-
-                # direction-consistency filter: BYPASSED per user request (去掉了 DI≥0.20).
-                # Entry no longer requires a direction-consistency gate; only trend-confirm
-                # (>=3)+volume + not-in-cooldown gate the open. (crash_drop / structure_break
-                # guards and the fixed-$50 SL are kept.)
-                direction_ok = True  # DI gate removed: always pass.
+                volatility_ok = True   # ADX gate removed
+                direction_ok = True    # DI gate removed
 
                 # equity floor
                 if args.equity_floor and pos and dd >= args.equity_floor:
@@ -248,70 +235,61 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # Use MT5's reported floating P&L. For XAUUSD this is pure price
-                # move against price_open, which already bakes in the spread (a BUY
-                # fills at the ask, is valued at the bid). Subtracting 0.37*oz here
-                # would double-count the spread and shift every graded-TP threshold.
-                if cur != 0 and pos:
-                    profit = sum(x.profit for x in pos)
-                    # --- 出场规则(按用户确认, 仅保留两项): ---
-                    # 1) H1结构止损已作为服务器端SL挂单(跌破H1高低点由MT5自动平, 零滑点).
-                    # 2) 浮盈>$50后, 回落到 peak*0.70(回撤30%) 才锁利. 去掉其他所有止损/破位/
-                    #    急跌/冷却/固定金额/ATR止损, 以及 $20/$30 小锁利档.
-                    if profit > 0:
-                        peak_profit = max(peak_profit, profit)
-                        P = peak_profit
-                        # 仅在峰值>$50时才进入回撤30%锁利; 不足$50不锁(让利润跑大波段)
-                        if P > 50.0:
-                            target = P * 0.70
-                        else:
-                            target = None
-                        # 仅在真正回撤(profit<P)时触发, 避免触及峰值瞬间提前锁利
-                        if target is not None and profit <= target and profit < P:
-                            log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f, 回撤30%) - 锁利" % (
-                                profit, target, P))
-                            for x in pos:
-                                if not args.dry_run:
-                                    close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                            peak_profit = 0.0
+                # --- 双向持仓管理: 同时持有 BUY 和 SELL, 各自独立判断 >$50/30% 锁利 ---
+                # 出场规则(用户确认, 仅两项): 1) H1结构止损(服务器端SL) 2) 浮盈>$50后回撤30%锁利.
+                for x in buys:
+                    prof = x.profit
+                    if prof > 0:
+                        peak_buy = max(peak_buy, prof)
+                        P = peak_buy
+                        target = P * 0.70 if P > 50.0 else None
+                        if target is not None and prof <= target and prof < P:
+                            log(ts, "TP", "BUY浮盈$%.0f 回落到目标$%.0f (峰值$%.0f, 回撤30%) - 锁利" % (prof, target, P))
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                            peak_buy = 0.0
                     else:
-                        peak_profit = 0.0
+                        peak_buy = 0.0
+                for x in sells:
+                    prof = x.profit
+                    if prof > 0:
+                        peak_sell = max(peak_sell, prof)
+                        P = peak_sell
+                        target = P * 0.70 if P > 50.0 else None
+                        if target is not None and prof <= target and prof < P:
+                            log(ts, "TP", "SELL浮盈$%.0f 回落到目标$%.0f (峰值$%.0f, 回撤30%) - 锁利" % (prof, target, P))
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                            peak_sell = 0.0
+                    else:
+                        peak_sell = 0.0
 
-                # (趋势反转反手REVERSE已按用户要求去掉; 出场仅靠 H1止损 + >$50回撤30%.)
-                # open fresh in trend direction when the trend confirms.
-                # Direction-aware crash cooldown: it only blocks the side that the crash/break
-                # turned AGAINST (catching the falling knife), and ALLOWS the with-trend side.
-                # crash_block_dir: +1 blocks LONG, -1 blocks SHORT, 0 blocks both (legacy).
-                # (crash冷却已按用户要求去掉; 开仓仅靠趋势确认 + last_open_ts 防重复开仓.)
-                if confirmed and cur == 0 and volatility_ok and direction_ok \
-                        and (time.time() - last_open_ts) > 5.0:
-                    otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
-                    price = ask if trend > 0 else bid
-                    # 真实SL挂单. 用 H1 结构止损(最近N根H1高低点)优先; 否则退回 2xATR.
-                    # BUY 止损 = H1低点下方; SELL 止损 = H1高点上方.
-                    oz = args.lot_size * USC
-                    if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None and h1_lo is not None:
-                        sl = h1_lo - 0.05 if otype == mt5.POSITION_TYPE_BUY else h1_hi + 0.05
-                        stop_mode = "H1"
+                # --- 双向开仓: 保持 BUY 和 SELL 各一腿, 无论趋势方向 ---
+                # H1结构止损: BUY止损=最近N根H1低点下方, SELL止损=最近N根H1高点上方.
+                oz = args.lot_size * USC
+                now_open_ok = (time.time() - last_open_ts) > 5.0
+                if not buys and now_open_ok:
+                    price = ask
+                    if args.stop_h1 and args.stop_h1 > 0 and h1_lo is not None:
+                        sl = h1_lo - 0.05; stop_mode = "H1"
                     else:
-                        stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else (args.stop_atr_mult * atr_now)
-                        sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
-                        stop_mode = "ATR"
-                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f SL=%.2f (%s止损)" % (
-                        trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
-                        args.lot_size, price, sl, stop_mode))
+                        sl = price - stop_pts; stop_mode = "ATR"
+                    log(ts, "OPEN", "双向 开BUY %.1f手 @%.2f SL=%.2f (%s止损)" % (args.lot_size, price, sl, stop_mode))
                     if not args.dry_run:
-                        res = open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
-                        # Refresh position immediately so the next loop does NOT think we are
-                        # flat and re-open on top of the just-filled order (position_id race).
+                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_BUY, price, sl, 202608, "open")
                         if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
-                            time.sleep(0.5)
-                            pos2 = mt5.positions_get(symbol=args.symbol) or []
-                            cur = 1 if any(x.type == mt5.POSITION_TYPE_BUY for x in pos2) else \
-                                  (-1 if any(x.type == mt5.POSITION_TYPE_SELL for x in pos2) else 0)
-                            pos = pos2
-                            peak_profit = 0.0
-                            last_open_ts = time.time()
+                            peak_buy = 0.0; last_open_ts = time.time()
+                if not sells and now_open_ok:
+                    price = bid
+                    if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None:
+                        sl = h1_hi + 0.05; stop_mode = "H1"
+                    else:
+                        sl = price + stop_pts; stop_mode = "ATR"
+                    log(ts, "OPEN", "双向 开SELL %.1f手 @%.2f SL=%.2f (%s止损)" % (args.lot_size, price, sl, stop_mode))
+                    if not args.dry_run:
+                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_SELL, price, sl, 202608, "open")
+                        if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
+                            peak_sell = 0.0; last_open_ts = time.time()
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
