@@ -55,8 +55,13 @@ def main():
     p.add_argument("--lot-size", type=float, default=0.3)
     p.add_argument("--bar-sec", type=float, default=30.0, help="candle period (30s per backtest)")
     p.add_argument("--ema-span", type=int, default=20, help="mean line EMA period")
-    p.add_argument("--dev-atr", type=float, default=1.0,
-                   help="enter when |price-EMA| >= this * ATR (counter-trend)")
+    p.add_argument("--dev-atr-low", type=float, default=1.0,
+                   help="enter mean-reversion only when |price-EMA20| reaches this * ATR (best timing)"
+                        "--the band 1.0-1.5 ATR has the best revert prob + space; below this is too "
+                        "early (small space).")
+    p.add_argument("--dev-atr-high", type=float, default=2.0,
+                   help="do NOT open past this * ATR deviation (deep deviation is often a real trend "
+                        "and reverts only ~43%), so stop opening new mean-reversion legs here.")
     p.add_argument("--hold-min", type=float, default=10.0, help="hold minutes before exit (plan C)")
     p.add_argument("--stop-h1", type=int, default=3,
                    help="H1 structure stop: BUY stop=low, SELL stop=high of last N H1 candles")
@@ -117,10 +122,16 @@ def main():
                         price = c[-1]
                         # dev uses REAL-TIME bid (not the possibly-stale M1 close)
                         dev = (bid - ema[-1]) / atr[-1] if atr[-1] and atr[-1] > 0 else 0.0
-                        if dev <= -args.dev_atr:
-                            signal = mt5.POSITION_TYPE_BUY    # 跌破均值过多 -> 低吸
-                        elif dev >= args.dev_atr:
-                            signal = mt5.POSITION_TYPE_SELL   # 升破均值过多 -> 高抛
+                        adev = abs(dev)
+                        # 最优入场时机: 仅当 1.0 <= |dev| <= 2.0 才触发均值回归.
+                        # <low(1.0) 太早(空间小); >high(2.0) 是深偏离/真趋势(回归概率降到~43%), 停开.
+                        if args.dev_atr_low <= adev <= args.dev_atr_high:
+                            if dev <= -args.dev_atr_low:
+                                signal = mt5.POSITION_TYPE_BUY    # 超卖 -> 低吸
+                            elif dev >= args.dev_atr_low:
+                                signal = mt5.POSITION_TYPE_SELL   # 超买 -> 高抛
+                        else:
+                            signal = None
                 except Exception:
                     signal = None
 
