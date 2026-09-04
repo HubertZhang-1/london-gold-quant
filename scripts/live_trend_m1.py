@@ -230,33 +230,8 @@ def main():
                 # overrides only if explicitly set > 0.
                 stop_pts = args.stop_atr_mult * atr_now
 
-                # --- crash/breakdown guards (慢涨防暴跌) ---
-                # 1) intraday cliff: last bar close change (sub-minute)
-                last_bar_change = float(bcl[-1] - bcl[-2]) if len(bcl) >= 2 else 0.0
-                crash_drop = args.crash_drop_pts > 0 and last_bar_change < -args.crash_drop_pts
-                # 2) structure breakdown: 多头跌破 EMA<slow> / 空头升破 EMA<slow> (熊市转头).
-                #    Use a buffer band (buffer*ATR) around the EMA so a normal whipsaw around
-                #    the trend line does NOT false-trigger. Break is confirmed only when price
-                #    crosses beyond EMA +/- buffer*ATR.
-                structure_break = False
-                if args.structure_close.lower() == "ema" and cur != 0 and len(es) >= 1:
-                    buf = args.structure_buffer_atr * atr_now
-                    if cur > 0 and bid < es[-1] - buf:
-                        structure_break = True          # 多单跌破多头趋势线(含缓冲) -> 熊市转头
-                    elif cur < 0 and ask > es[-1] + buf:
-                        structure_break = True          # 空单升破(含缓冲) -> 反转
-
-                # Even if flat, a cliff means stand aside. Direction-aware cooldown so it blocks
-                # the with-the-crash LONG (catching the falling knife) but DOES NOT block the
-                # with-trend SHORT. This is the fix for "为什么没做空": the old code blocked
-                # every direction, so a confirmed downtrend signal right after a drop was lost.
-                if cur == 0 and crash_drop:
-                    crash_block_until = time.time() + args.crash_cooldown_sec
-                    crash_block_dir = 1   # price dropped -> only block LONG rebounds
-
+                # (crash/breakdown guards 已按用户要求去掉; 仅保留 H1 结构止损.)
                 # volatility state filter: BYPASSED per user request (去掉了 ADX≥22 门槛).
-                # Now the entry does NOT require ADX; only trend-confirm(>=3)+volume + DI>=0.20
-                # + not-in-cooldown gate the open. (crash_drop / structure_break guards are kept.)
                 volatility_ok = True  # ADX gate removed: always pass.
 
                 # direction-consistency filter: BYPASSED per user request (去掉了 DI≥0.20).
@@ -279,62 +254,21 @@ def main():
                 # would double-count the spread and shift every graded-TP threshold.
                 if cur != 0 and pos:
                     profit = sum(x.profit for x in pos)
-                    # --- 慢涨防暴跌: 三层防护, 最高优先级 ---
-                    if crash_drop:
-                        log(ts, "CRASH", "单分钟急跌%.2f点 (基线>%.1f) - 立即全平" % (
-                            last_1m_change, args.crash_drop_pts))
-                        for x in pos:
-                            if not args.dry_run:
-                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                        peak_profit = 0.0
-                        crash_block_until = time.time() + args.crash_cooldown_sec
-                        crash_block_dir = 1   # price dropped -> block LONG only, allow SHORT (with-trend)
-                        time.sleep(args.cycle_sec); continue
-                    if structure_break:
-                        log(ts, "STRUCTURE", "跌破EMA%d趋势线(含%.1fATR缓冲) 熊市转头 - 全平规避" % (
-                            args.ema_slow, args.structure_buffer_atr))
-                        for x in pos:
-                            if not args.dry_run:
-                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                        peak_profit = 0.0
-                        crash_block_until = time.time() + args.crash_cooldown_sec
-                        crash_block_dir = cur  # trend broke against cur: block the same side we
-                                               # just exited, allow the with-trend opposite side
-                        time.sleep(args.cycle_sec); continue
-                    # --- H1 结构止损已作为服务器端SL挂单, 零滑点; 策略侧兜底仅在非H1时生效. ---
-                    oz = sum(x.volume for x in pos) * USC
-                    if args.stop_h1 and args.stop_h1 > 0 and h1_lo is not None:
-                        stop_dollar = 0.0  # H1 stop handled server-side; skip the ATR fallback
-                    else:
-                        stop_dollar = args.stop_usd if args.stop_usd > 0 else (stop_pts * oz)
-                    if stop_dollar > 0 and profit <= -stop_dollar:
-                        log(ts, "STOP", "浮亏$%.0f 触及止损($%.0f, %.2f点/%.1f手) - 平仓" % (
-                            abs(profit), stop_dollar, stop_dollar / oz, sum(x.volume for x in pos)))
-                        for x in pos:
-                            if not args.dry_run:
-                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                        peak_profit = 0.0
-                        time.sleep(args.cycle_sec); continue
-                    # full graded take-profit (你确认的规则: 浮盈>20后, 跌回$20锁利).
-                    # $20 是锁利地线; 峰值越高锁利越高:
-                    #   峰值 <  $20 -> 未激活, 不锁
-                    #   $20<=峰值<$30 -> 回落到 $20 锁利
-                    #   $30<=峰值<=$50 -> 回落到 $30 锁利
-                    #   峰值 >  $50    -> 回落到 peak*0.70 锁利 (回撤30%)
+                    # --- 出场规则(按用户确认, 仅保留两项): ---
+                    # 1) H1结构止损已作为服务器端SL挂单(跌破H1高低点由MT5自动平, 零滑点).
+                    # 2) 浮盈>$50后, 回落到 peak*0.70(回撤30%) 才锁利. 去掉其他所有止损/破位/
+                    #    急跌/冷却/固定金额/ATR止损, 以及 $20/$30 小锁利档.
                     if profit > 0:
                         peak_profit = max(peak_profit, profit)
                         P = peak_profit
-                        if P < 20.0:
-                            target = None            # 浮盈未超过$20, 不锁
-                        elif P < 30.0:
-                            target = 20.0            # 跌回$20锁利
-                        elif P <= 50.0:
-                            target = 30.0
-                        else:
+                        # 仅在峰值>$50时才进入回撤30%锁利; 不足$50不锁(让利润跑大波段)
+                        if P > 50.0:
                             target = P * 0.70
+                        else:
+                            target = None
                         # 仅在真正回撤(profit<P)时触发, 避免触及峰值瞬间提前锁利
                         if target is not None and profit <= target and profit < P:
-                            log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f) - 锁利" % (
+                            log(ts, "TP", "浮盈$%.0f 回落到目标$%.0f (峰值$%.0f, 回撤30%) - 锁利" % (
                                 profit, target, P))
                             for x in pos:
                                 if not args.dry_run:
@@ -343,25 +277,13 @@ def main():
                     else:
                         peak_profit = 0.0
 
-                # reversal
-                if confirmed and cur != 0 and trend != cur:
-                    log(ts, "REVERSE", "趋势%+d vs 持仓%+d 反手" % (trend, cur))
-                    for x in pos:
-                        if not args.dry_run:
-                            close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                    peak_profit = 0.0
-                    cur = 0
-                # open fresh in trend direction ONLY when volatility is active (strong ADX /
-                # widening band), so we DON'T trade the $20-within tiny/noise regime where
-                # losses concentrate. 小波动(ADX低/带宽窄) -> 不做, 避免在无优势区间被点差消耗.
+                # (趋势反转反手REVERSE已按用户要求去掉; 出场仅靠 H1止损 + >$50回撤30%.)
+                # open fresh in trend direction when the trend confirms.
                 # Direction-aware crash cooldown: it only blocks the side that the crash/break
                 # turned AGAINST (catching the falling knife), and ALLOWS the with-trend side.
                 # crash_block_dir: +1 blocks LONG, -1 blocks SHORT, 0 blocks both (legacy).
-                in_crash_cooldown = time.time() < crash_block_until
-                blocked_by_cooldown = in_crash_cooldown and (
-                    crash_block_dir == 0 or (crash_block_dir > 0 and trend > 0) or
-                    (crash_block_dir < 0 and trend < 0))
-                if confirmed and cur == 0 and volatility_ok and direction_ok and not blocked_by_cooldown \
+                # (crash冷却已按用户要求去掉; 开仓仅靠趋势确认 + last_open_ts 防重复开仓.)
+                if confirmed and cur == 0 and volatility_ok and direction_ok \
                         and (time.time() - last_open_ts) > 5.0:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
@@ -390,10 +312,6 @@ def main():
                             pos = pos2
                             peak_profit = 0.0
                             last_open_ts = time.time()
-                elif confirmed and cur == 0 and blocked_by_cooldown:
-                    log(ts, "CRASH_COOLDOWN", "暴跌冷却中 %.0fs 挡住%s - 放行反向" % (
-                        crash_block_until - time.time(),
-                        "多" if crash_block_dir > 0 else "空"))
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
