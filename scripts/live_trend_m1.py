@@ -57,9 +57,13 @@ def main():
                    help="optional fixed max loss per position in USD (单笔≤$X). 0 = disabled "
                         "(use the ATR stop below instead).")
     p.add_argument("--stop-atr-mult", type=float, default=2.0,
-                   help="adaptive stop: multiplier x ATR. Used when --stop-usd is 0. The stop "
-                        "widens/narrows with volatility (2xATR is the confirmed rule). This is the "
-                        "primary stop, attached as a server-side SL at open.")
+                   help="adaptive stop: multiplier x ATR. Used when --stop-usd is 0 and "
+                        "--stop-h1 is disabled. The stop widens/narrows with volatility.")
+    p.add_argument("--stop-h1", type=int, default=3,
+                   help="structure stop based on the last N one-hour candles' high/low. "
+                        "BUY stop = low of the last N H1 candles; SELL stop = high of the last N "
+                        "H1 candles. 0 = disable and fall back to the ATR stop. This replaces the "
+                        "fixed/ATR stop with an H1 structure stop (per user).")
     p.add_argument("--trend-confirm", type=int, default=3,
                    help="require this many consecutive same trend to confirm entry")
     p.add_argument("--bar-sec", type=float, default=20.0,
@@ -142,6 +146,17 @@ def main():
                 t = mt5.symbol_info_tick(args.symbol)
                 bid = t.bid; ask = t.ask
                 al = (2 / (args.ema_primary + 1)) if args.ema_alpha is None else args.ema_alpha
+
+                # --- H1 structure range for the stop (past N H1 candles' high/low) ---
+                h1_hi = h1_lo = None
+                if args.stop_h1 and args.stop_h1 > 0:
+                    try:
+                        h1 = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_H1, 0, args.stop_h1)
+                        if h1 is not None and len(h1) >= 1:
+                            h1_hi = float(h1["high"].max())
+                            h1_lo = float(h1["low"].min())
+                    except Exception:
+                        h1_hi = h1_lo = None
 
                 # --- sub-minute trend bars (per user: bar-sec=10s) aggregated from ticks ---
                 # Build a OHLCV series at the sub-minute cadence, then run EMA5/10/30 + trend on
@@ -286,9 +301,12 @@ def main():
                         crash_block_dir = cur  # trend broke against cur: block the same side we
                                                # just exited, allow the with-trend opposite side
                         time.sleep(args.cycle_sec); continue
-                    # --- 止损: 2xATR 自适应 (确认规则; 随波动变宽/变窄). 可选固定 --stop-usd 覆盖. ---
+                    # --- H1 结构止损已作为服务器端SL挂单, 零滑点; 策略侧兜底仅在非H1时生效. ---
                     oz = sum(x.volume for x in pos) * USC
-                    stop_dollar = args.stop_usd if args.stop_usd > 0 else (stop_pts * oz)
+                    if args.stop_h1 and args.stop_h1 > 0 and h1_lo is not None:
+                        stop_dollar = 0.0  # H1 stop handled server-side; skip the ATR fallback
+                    else:
+                        stop_dollar = args.stop_usd if args.stop_usd > 0 else (stop_pts * oz)
                     if stop_dollar > 0 and profit <= -stop_dollar:
                         log(ts, "STOP", "浮亏$%.0f 触及止损($%.0f, %.2f点/%.1f手) - 平仓" % (
                             abs(profit), stop_dollar, stop_dollar / oz, sum(x.volume for x in pos)))
@@ -347,15 +365,19 @@ def main():
                         and (time.time() - last_open_ts) > 5.0:
                     otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
                     price = ask if trend > 0 else bid
-                    # 真实SL挂单: MT5终端在价格触及止损价瞬间成交, 零滑点.
-                    # 止损点数: 固定 --stop-usd 优先, 否则用 2xATR(自适应) stop_pts.
-                    # BUY止损在下方, SELL止损在上方.
+                    # 真实SL挂单. 用 H1 结构止损(最近N根H1高低点)优先; 否则退回 2xATR.
+                    # BUY 止损 = H1低点下方; SELL 止损 = H1高点上方.
                     oz = args.lot_size * USC
-                    stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else (args.stop_atr_mult * atr_now)
-                    sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
-                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f SL=%.2f (波动可交易)" % (
+                    if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None and h1_lo is not None:
+                        sl = h1_lo - 0.05 if otype == mt5.POSITION_TYPE_BUY else h1_hi + 0.05
+                        stop_mode = "H1"
+                    else:
+                        stop_pts = (args.stop_usd / oz) if args.stop_usd > 0 else (args.stop_atr_mult * atr_now)
+                        sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
+                        stop_mode = "ATR"
+                    log(ts, "OPEN", "趋势%+d %s 开%s %.1f手 @%.2f SL=%.2f (%s止损)" % (
                         trend, "涨" if trend > 0 else "跌", "多" if trend > 0 else "空",
-                        args.lot_size, price, sl))
+                        args.lot_size, price, sl, stop_mode))
                     if not args.dry_run:
                         res = open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
                         # Refresh position immediately so the next loop does NOT think we are
