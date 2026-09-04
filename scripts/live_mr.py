@@ -89,6 +89,7 @@ def main():
     print("均值回归(1-15分钟波段) 运行中 — 人工审核")
     print("=" * 62)
     last_open_ts = 0.0
+    peaks = {}  # ticket -> peak profit, per-position staged-TP tracking
     try:
         while True:
             try:
@@ -151,21 +152,39 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # 出场: 持仓超过 hold_min 分钟 -> 平仓 (plan C). H1结构止损由服务器端SL处理.
+                # --- 分段止盈 (B方案): 每个持仓独立跟踪峰值, 回落到 20/30/50 档锁利 ---
+                pruned = False
                 for x in pos:
-                    age_min = (time.time() - x.time) / 60.0
-                    if age_min >= args.hold_min:
-                        log(ts, "HOLD", "持仓%.0f分钟达标 (%.1f) - 平仓" % (args.hold_min, age_min))
-                        if not args.dry_run:
-                            close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
-                        time.sleep(args.cycle_sec); continue
+                    tk = x.ticket
+                    prof = x.profit
+                    if prof > 0:
+                        peaks[tk] = max(peaks.get(tk, 0.0), prof)
+                        P = peaks[tk]
+                        if P < 20.0:
+                            target = None
+                        elif P < 30.0:
+                            target = 20.0
+                        elif P <= 50.0:
+                            target = 30.0
+                        else:
+                            target = P * 0.70
+                        if target is not None and prof <= target and prof < P:
+                            log(ts, "TP", "%s浮盈$%.0f 回落到$%.0f (峰值$%.0f) - 分段锁利" % (
+                                "多" if x.type == mt5.POSITION_TYPE_BUY else "空", prof, target, P))
+                            if not args.dry_run:
+                                close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
+                            peaks.pop(tk, None)
+                            pruned = True
+                    else:
+                        peaks[tk] = 0.0
+                if pruned:
+                    pos = mt5.positions_get(symbol=args.symbol) or []
 
-                # 开仓: 无持仓且出现均值回归信号
+                # --- 开仓: 任意新均值回归信号都开新单 (不管当前是否已有持仓) ---
                 now_open_ok = (time.time() - last_open_ts) > 5.0
-                if not pos and signal is not None and now_open_ok:
+                if signal is not None and now_open_ok:
                     otype = signal
                     price_use = ask if otype == mt5.POSITION_TYPE_BUY else bid
-                    # SL: H1结构位兜底
                     if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None and h1_lo is not None:
                         sl = (h1_lo - 0.05) if otype == mt5.POSITION_TYPE_BUY else (h1_hi + 0.05)
                         smode = "H1"
@@ -173,12 +192,15 @@ def main():
                         sl = price_use - (2.0 * (atr[-1] if len(atr) else 1.0)) if otype == mt5.POSITION_TYPE_BUY \
                             else price_use + (2.0 * (atr[-1] if len(atr) else 1.0))
                         smode = "ATR"
-                    log(ts, "OPEN", "偏离%.2fATR %s %.1f手 @%.2f SL=%.2f (%s止损) 持%.0f分钟" % (
+                    log(ts, "OPEN", "偏离%.2fATR %s %.1f手 @%.2f SL=%.2f (%s止损)" % (
                         dev, "低吸多" if otype == mt5.POSITION_TYPE_BUY else "高抛空",
-                        args.lot_size, price_use, sl, smode, args.hold_min))
+                        args.lot_size, price_use, sl, smode))
                     if not args.dry_run:
                         res = open_order(args.symbol, args.lot_size, otype, price_use, sl, 202608, "mr_open")
                         if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
+                            pos = mt5.positions_get(symbol=args.symbol) or []
+                            for nx in pos:
+                                peaks.setdefault(nx.ticket, 0.0)
                             last_open_ts = time.time()
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
