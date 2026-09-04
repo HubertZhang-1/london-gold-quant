@@ -97,37 +97,32 @@ def main():
                 t = mt5.symbol_info_tick(args.symbol)
                 bid = t.bid; ask = t.ask
 
+                # --- 用 M1 K线(最新, 无滞后) 算 EMA/ATR; dev 用实时 bid ---
+                # copy_ticks_from 的历史tick在这个环境滞后严重(最新bar滞后数小时),
+                # 导致 dev 失真误判方向。改用 copy_rates_from_pos(M1) 是稳定的、和实时一致。
                 bar_sec = args.bar_sec if args.bar_sec and args.bar_sec > 0 else 60.0
-                max_ticks = 20000
-                lookback = max(3600.0, 1.6 * 2000 * bar_sec)
-                ticks = None
+                ema = np.array([]); atr = np.array([]); price = None; dev = 0.0
+                signal = None
                 try:
-                    ticks = mt5.copy_ticks_from(args.symbol, datetime.now() - timedelta(seconds=lookback),
-                                                max_ticks, mt5.COPY_TICKS_ALL)
+                    r = mt5.copy_rates_from_pos(args.symbol, mt5.TIMEFRAME_M1, 0, 300)
+                    if r is not None and len(r) >= args.ema_span + 5:
+                        d1 = pd.DataFrame(r)
+                        c = d1["close"].astype(float).to_numpy()
+                        h = d1["high"].astype(float).to_numpy()
+                        l = d1["low"].astype(float).to_numpy()
+                        ema = ewm(c, args.ema_span)
+                        prev = np.concatenate([[c[0]], c[:-1]])
+                        tr = np.maximum(np.maximum(h - l, np.abs(h - prev)), np.abs(l - prev))
+                        atr = pd.Series(tr).rolling(14).mean().to_numpy()
+                        price = c[-1]
+                        # dev uses REAL-TIME bid (not the possibly-stale M1 close)
+                        dev = (bid - ema[-1]) / atr[-1] if atr[-1] and atr[-1] > 0 else 0.0
+                        if dev <= -args.dev_atr:
+                            signal = mt5.POSITION_TYPE_BUY    # 跌破均值过多 -> 低吸
+                        elif dev >= args.dev_atr:
+                            signal = mt5.POSITION_TYPE_SELL   # 升破均值过多 -> 高抛
                 except Exception:
-                    ticks = None
-
-                if ticks is not None and len(ticks) >= 5:
-                    tf = pd.DataFrame(ticks)
-                    tf["ts"] = (pd.to_datetime(tf["time"], unit="s").dt.floor(str(int(bar_sec)) + "s"))
-                    tf["mid"] = 0.5 * (tf["bid"] + tf["ask"])
-                    bars = tf.groupby("ts")["mid"].agg(["first", "max", "min", "last"])
-                    c = bars["last"].to_numpy()
-                    h = bars["max"].to_numpy(); l = bars["min"].to_numpy()
-                    ema = ewm(c, args.ema_span)
-                    prev = np.concatenate([[c[0]], c[:-1]])
-                    tr = np.maximum(np.maximum(h - l, np.abs(h - prev)), np.abs(l - prev))
-                    atr = pd.Series(tr).rolling(14).mean().to_numpy()
-                    price = c[-1]
-                    dev = (price - ema[-1]) / atr[-1] if atr[-1] and atr[-1] > 0 else 0.0
                     signal = None
-                    if dev <= -args.dev_atr:
-                        signal = mt5.POSITION_TYPE_BUY    # 跌破均值过多 -> 低吸
-                    elif dev >= args.dev_atr:
-                        signal = mt5.POSITION_TYPE_SELL   # 升破均值过多 -> 高抛
-                else:
-                    signal = None
-                    ema = np.array([]); atr = np.array([]); price = None
 
                 # H1 structure stop
                 h1_hi = h1_lo = None
