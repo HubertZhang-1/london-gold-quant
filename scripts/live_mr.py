@@ -79,8 +79,8 @@ def main():
     demo = info.trade_mode == 0
     if not demo:
         args.dry_run = True
-    print("演示账户 %s | 均值回归 | %.0f秒K线 EMA%d 偏离%.1fATR 持%.0f分钟" % (
-        info.login, args.bar_sec, args.ema_span, args.dev_atr, args.hold_min))
+    print("演示账户 %s | 均值回归 | EMA%d 偏离%.1f~%.1fATR 开仓 | %.0f秒K线" % (
+        info.login, args.ema_span, args.dev_atr_low, args.dev_atr_high, args.bar_sec))
     Path(args.log).parent.mkdir(parents=True, exist_ok=True)
 
     def log(ts, ev, detail):
