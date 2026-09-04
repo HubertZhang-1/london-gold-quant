@@ -235,8 +235,9 @@ def main():
                             close_by_ticket(args.symbol, x.ticket, x.volume, x.type)
                     time.sleep(args.cycle_sec); continue
 
-                # --- 双向持仓管理: 同时持有 BUY 和 SELL, 各自独立判断 >$50/30% 锁利 ---
+                # --- 状态机: 单向为主, 趋势反转触发双向, 平掉一腿回单向 ---
                 # 出场规则(用户确认, 仅两项): 1) H1结构止损(服务器端SL) 2) 浮盈>$50后回撤30%锁利.
+                # 对每个存在的腿, 独立判断止盈. 平掉后该腿消失.
                 for x in buys:
                     prof = x.profit
                     if prof > 0:
@@ -264,32 +265,49 @@ def main():
                     else:
                         peak_sell = 0.0
 
-                # --- 双向开仓: 保持 BUY 和 SELL 各一腿, 无论趋势方向 ---
-                # H1结构止损: BUY止损=最近N根H1低点下方, SELL止损=最近N根H1高点上方.
+                # 重新读取(可能刚平掉一腿), 更新 buys/sells
+                pos = mt5.positions_get(symbol=args.symbol) or []
+                buys = [x for x in pos if x.type == mt5.POSITION_TYPE_BUY]
+                sells = [x for x in pos if x.type == mt5.POSITION_TYPE_SELL]
+
                 oz = args.lot_size * USC
                 now_open_ok = (time.time() - last_open_ts) > 5.0
-                if not buys and now_open_ok:
-                    price = ask
-                    if args.stop_h1 and args.stop_h1 > 0 and h1_lo is not None:
-                        sl = h1_lo - 0.05; stop_mode = "H1"
-                    else:
-                        sl = price - stop_pts; stop_mode = "ATR"
-                    log(ts, "OPEN", "双向 开BUY %.1f手 @%.2f SL=%.2f (%s止损)" % (args.lot_size, price, sl, stop_mode))
+
+                # --- 单向: 空仓时开当前趋势方向的一腿 ---
+                if not buys and not sells:
+                    if trend != 0 and now_open_ok:
+                        otype = mt5.POSITION_TYPE_BUY if trend > 0 else mt5.POSITION_TYPE_SELL
+                        price = ask if trend > 0 else bid
+                        if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None and h1_lo is not None:
+                            sl = (h1_lo - 0.05) if otype == mt5.POSITION_TYPE_BUY else (h1_hi + 0.05)
+                            stop_mode = "H1"
+                        else:
+                            sl = price - stop_pts if otype == mt5.POSITION_TYPE_BUY else price + stop_pts
+                            stop_mode = "ATR"
+                        log(ts, "OPEN", "趋势%+d 开%s %.1f手 @%.2f SL=%.2f (%s止损)" % (
+                            trend, "多" if trend > 0 else "空", args.lot_size, price, sl, stop_mode))
+                        if not args.dry_run:
+                            res = open_order(args.symbol, args.lot_size, otype, price, sl, 202608, "open")
+                            if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
+                                last_open_ts = time.time()
+
+                # --- 双向触发: 持有一腿且趋势反转(与持仓方向相反), 该腿未到止损 -> 补开反向腿 ---
+                elif buys and not sells and trend == -1 and now_open_ok:
+                    log(ts, "DUAL", "趋势转为-1, BUY未止损 -> 补开SELL 双向对冲")
+                    sl = (h1_hi + 0.05) if (args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None) else (
+                        bid + stop_pts)
                     if not args.dry_run:
-                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_BUY, price, sl, 202608, "open")
-                        if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
-                            peak_buy = 0.0; last_open_ts = time.time()
-                if not sells and now_open_ok:
-                    price = bid
-                    if args.stop_h1 and args.stop_h1 > 0 and h1_hi is not None:
-                        sl = h1_hi + 0.05; stop_mode = "H1"
-                    else:
-                        sl = price + stop_pts; stop_mode = "ATR"
-                    log(ts, "OPEN", "双向 开SELL %.1f手 @%.2f SL=%.2f (%s止损)" % (args.lot_size, price, sl, stop_mode))
-                    if not args.dry_run:
-                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_SELL, price, sl, 202608, "open")
+                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_SELL, bid, sl, 202608, "open")
                         if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
                             peak_sell = 0.0; last_open_ts = time.time()
+                elif sells and not buys and trend == 1 and now_open_ok:
+                    log(ts, "DUAL", "趋势转为+1, SELL未止损 -> 补开BUY 双向对冲")
+                    sl = (h1_lo - 0.05) if (args.stop_h1 and args.stop_h1 > 0 and h1_lo is not None) else (
+                        ask - stop_pts)
+                    if not args.dry_run:
+                        res = open_order(args.symbol, args.lot_size, mt5.POSITION_TYPE_BUY, ask, sl, 202608, "open")
+                        if res is not None and getattr(res, "retcode", -1) == mt5.TRADE_RETCODE_DONE:
+                            peak_buy = 0.0; last_open_ts = time.time()
 
                 buy_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_BUY)
                 sell_lots = sum(x.volume for x in pos if x.type == mt5.POSITION_TYPE_SELL)
